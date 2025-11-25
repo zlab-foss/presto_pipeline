@@ -1,0 +1,13 @@
+earthengine_api==1.6.6
+einops==0.8.1
+geedim==2.0.0
+geemap==0.36.6
+geopandas==0.14.4
+matplotlib==3.8.3
+numpy==1.26.4
+pyproj==3.7.2
+rasterio==1.4.3
+scikit_learn==1.7.2
+seaborn==0.13.2
+Shapely==2.1.2
+tqdm==4.66.2
