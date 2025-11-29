@@ -29,6 +29,45 @@ def run_inference_single(config: dict):
         batch_size=config.get("batch_size", 2048),
         device=device,
     )
+    
+    try:
+        loader, meta = inference_loader(
+            config["input_path"],
+            mask_path=config.get("mask_path", None),
+            batch_size=config.get("batch_size", 2048),
+            device=device,
+        )
+    
+    except RuntimeError as e:
+        msg = str(e)
+    
+        # Case: mask has no cropland pixels (value = 4)
+        if "No pixels with value 4" in msg:
+    
+            # Read tile shape from image tile
+            with rasterio.open(config["input_path"]) as src:
+                H, W = src.height, src.width
+                profile = src.profile
+    
+            # Full-zero prediction tile
+            full_pred = np.zeros((H, W), dtype=np.uint8)
+    
+            # Output path
+            tile_pred_path = config["output_path"],
+    
+            # Save fully zero TIFF
+            save_pred_to_tiff(
+                out_arr=full_pred,
+                out_tiff=str(tile_pred_path),
+                ref_tiff=str(config["input_path"]),
+                dtype="uint8",
+                nodata=0,
+                compress="lzw",
+            )
+    
+            return   full_pred
+    
+    
 
     # --- Load model ---
     clf = PrestoClassifier.load(config["model_path"], device=device)
