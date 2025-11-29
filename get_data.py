@@ -14,8 +14,6 @@ os.environ["PROJ_LIB"]  = pyproj_proj          # keep both for compatibility
 if "CONDA_PREFIX" in os.environ:
     os.environ.setdefault("GDAL_DATA", f"{os.environ['CONDA_PREFIX']}/share/gdal")
 
-
-
 from pathlib import Path
 import ee
 import geemap
@@ -45,22 +43,8 @@ class S2S1PrestoDownloader:
     ):
 
         # ------------------------------------------------------------------
-        #  AUTH + INIT
-        # ------------------------------------------------------------------
-        # try:
-        #     _ = ee.Number(1).getInfo()   # Dry-run check
-        # except Exception:
-        #     print("🔐 Authenticating Earth Engine...")
-        #     ee.Authenticate()
-
-
-        # ee.Initialize(project=gee_project) if gee_project else ee.Initialize()
-        # print("✅ Earth Engine initialized.\n")
-        
-        # ------------------------------------------------------------------
         #  AUTH + INIT (using credentials)
         # ----------------------------------------------------------------
-        
         credentials_path =  "credentials/earthengine_credentials.json"
         service_account = 'fanapanomaly@fanapanomaly.iam.gserviceaccount.com'
 
@@ -68,13 +52,20 @@ class S2S1PrestoDownloader:
         credentials = ee.ServiceAccountCredentials(service_account, credentials_path)
         ee.Initialize(credentials)
         
-
         # ------------------------------------------------------------------
         #  STORE CONFIG
         # ------------------------------------------------------------------
         self.asset_path = asset_path
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # NEW: base name per shapefile / asset for filenames
+        path = Path(asset_path)
+        if path.exists():
+            self.asset_name = path.stem  # e.g. wetlands2.shp → "wetlands2"
+        else:
+            # for EE assets, take last part and sanitize a bit
+            self.asset_name = asset_path.split("/")[-1].replace(":", "_")
 
         self.export_scale = export_scale          # meters per pixel
         self.s2_cloudy_pct = s2_cloudy_pct
@@ -254,27 +245,21 @@ class S2S1PrestoDownloader:
         new = old.map(lambda n: ee.String(n).split("_").slice(1).join("_"))
         return stack.rename(new).toFloat()
 
-
     # ----------------------------------------------------------------------
     #  DOWNLOAD FEATURE AS TILED CROPPED IMAGES
     # ----------------------------------------------------------------------
-
     def download_feature(self, feature, feat_idx, season_year):
         roi = feature.geometry()
         img = self.create_stack(roi, season_year)
     
-        # Output filename
-        out_path = self.output_dir / f"season{season_year}_feat{feat_idx}.tif"
+        # NEW: include shapefile/asset base name in the filename
+        # e.g. wetlands2_season2024_feat0.tif
+        out_path = self.output_dir / f"{self.asset_name}_season{season_year}_feat{feat_idx}.tif"
         
-        # 1. Wrap the EE image in a geedim MaskedImage
-        #    We clip to ROI here to ensure bounds are set
         gd_img = geedim.MaskedImage(img.clip(roi))
     
         print(f"  ⬇️  Downloading Feature {feat_idx} to {out_path}...")
     
-        # 2. Download directly
-        #    'crs': None defaults to the image's native CRS, or specify "EPSG:4326"
-        #    'scale': 10 enforces the resolution
         try:
             gd_img.download(
                 str(out_path), 
@@ -286,7 +271,8 @@ class S2S1PrestoDownloader:
             print(f"  ✓ Saved Feature {feat_idx}")
         except Exception as e:
             print(f"  ❌ Error downloading feature {feat_idx}: {e}")
-        # ----------------------------------------------------------------------
+
+    # ----------------------------------------------------------------------
     #  MAIN DRIVER
     # ----------------------------------------------------------------------
     def run(self):
@@ -312,3 +298,19 @@ class S2S1PrestoDownloader:
 
         print(f"\n✓ All done → {count} features processed. Output: {self.output_dir}")
 
+
+if __name__ == "__main__":
+    # Example: loop over all .shp in a folder
+    shp_dir = Path("./data/ROI/sample_wetlands")
+
+    for shp_path in sorted(shp_dir.glob("*.shp")):
+        print(f"\n\n==============================")
+        print(f"Processing shapefile: {shp_path.name}")
+        print(f"==============================")
+
+        downloader = S2S1PrestoDownloader(
+            asset_path=str(shp_path),
+            output_dir="./data/inputs",
+            start_year=2024,
+        )
+        downloader.run()

@@ -63,6 +63,7 @@ def inference_loader(
     x, mk, dw = build_presto_inputs_from_cube(month_bands, per_month_order)
 
     # 🔹 fill NaNs in X over time (per pixel, per feature)
+    x = torch.where(torch.isfinite(x), x, torch.tensor(float('nan'), dtype=x.dtype, device=x.device))
     x = interpolate_nan_temporal(x)
 
     # ---- lat/lon to (N,2) ----
