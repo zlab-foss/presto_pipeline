@@ -87,14 +87,21 @@ def run_presto_pipeline(configs: dict):
 
             run_inference_big_tif(cfg)
 
+import re
+
+def natural_key(p: Path):
+    """Extract numeric index from filename like roi_123.shp."""
+    m = re.search(r"(\d+)", p.stem)
+    return int(m.group(1)) if m else 0
+
+
 if __name__ == "__main__":
     
-    
 
-    for year in [2024, 2017, 2019]:
-        shp_dir = Path("./data/ROI/sample_wetlands")
+    shp_dir = Path("./data/ROI/sample_wetlands")
 
-        for shp_path in sorted(shp_dir.glob("*.shp")):
+    for shp_path in sorted(shp_dir.glob("*.shp"), key=natural_key):
+        for year in [2024, 2017, 2019]:
             configs = {
                 "asset_path": shp_path,
                 "year": year,
