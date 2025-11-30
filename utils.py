@@ -35,18 +35,35 @@ def _make_synthetic_lulc_mask_like(
     """
     Create a 1-band LULC mask with all pixels == value,
     aligned to the georeferencing of input_tif.
+
+    IMPORTANT:
+    - Do NOT keep the input nodata (often -inf / float),
+      because we're writing an int16 mask.
     """
     input_tif = Path(input_tif)
     out_tif = Path(out_tif)
 
     with rasterio.open(input_tif) as src:
         meta = src.meta.copy()
-        meta.update(count=1, dtype="int16")  # single-band integer mask
+
+        # Force a clean integer mask meta
+        meta.update(
+            count=1,
+            dtype="int16",
+            nodata=0,  # safe int16 nodata within range
+        )
+
+        # Some drivers / older files may carry extra tags that conflict – remove what we don't need
+        # (GDAL can ignore extras, but this keeps it clean)
+        meta.pop("alph", None)
+        meta.pop("mask", None)
+
         data = np.full((1, src.height, src.width), value, dtype="int16")
 
         out_tif.parent.mkdir(parents=True, exist_ok=True)
         with rasterio.open(out_tif, "w", **meta) as dst:
             dst.write(data)
+
 
 
 def _append_metadata_row(csv_path: Path, row: dict, fieldnames: list[str]) -> None:
