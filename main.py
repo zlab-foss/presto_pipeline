@@ -636,7 +636,7 @@ if __name__ == "__main__":
         "sensor_type": "sentinel",  # "sentinel" or "landsat"
         "sentinel_bands": ["red", "green", "blue", "nir"],
         "out_dir": "./data/karkheh",
-        "tile_size": 4026,
+        "tile_size": 1024,
         "landuse_method": "ESRI",  # "ESRI", "presto", or "skip"
         "device": "cuda",  # "cuda" or "cpu"
     }
