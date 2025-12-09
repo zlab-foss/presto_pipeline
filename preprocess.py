@@ -8,6 +8,7 @@ from collections import OrderedDict
 
 from utils.utils import align_and_stack_tifs
 from utils.preprocess_utils import interpolate_nan_temporal, _gather_cube
+from torch.utils.data import DataLoader, TensorDataset
 
 # ============================================================
 #  Band / group configuration
@@ -127,6 +128,7 @@ class PrestoTensorBuilder:
         group_flags: Dict[str, bool] | None = None,
         q_low: float = 10.0,
         q_high: float = 90.0,
+        batch_size: int = 2048,
     ):
         """
         Parameters
@@ -144,9 +146,12 @@ class PrestoTensorBuilder:
         q_low, q_high : float
             Percentile bounds for robust scaling per channel for
             *temporal* groups (S1, S2, ERA5).
+        batch_size : int
+            Batch size for the output DataLoader.
         """
         self.q_low = q_low
         self.q_high = q_high
+        self.batch_size = int(batch_size)
 
         # Merge default availability with user overrides
         base = OrderedDict(GROUP_AVAILABLE)
@@ -185,9 +190,9 @@ class PrestoTensorBuilder:
         self,
         paths: Sequence[Path],
         ref_index: int = 0,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> DataLoader:
         """
-        Build Presto tensors from a list of aligned monthly GeoTIFF stacks.
+        Build Presto DataLoader from a list of aligned monthly GeoTIFF stacks.
 
         Parameters
         ----------
@@ -204,12 +209,14 @@ class PrestoTensorBuilder:
 
         Returns
         -------
-        x_12_17_N : torch.Tensor
-            Shape (12, 17, N), float32. Presto inputs.
-        mask_12_17_N : torch.Tensor
-            Shape (12, 17, N), float32. 1 = masked/unavailable, 0 = valid.
-        dw_12_N : torch.Tensor
-            Shape (12, N), long. Placeholder DynamicWorld (all 9).
+        DataLoader
+            PyTorch DataLoader with batches of (x, dw, latlons, mask, labels)
+            where:
+                x: (batch, 12, 17) - Presto inputs
+                dw: (batch, 12) - DynamicWorld placeholder
+                latlons: (batch, 2) - lat/lon coordinates
+                mask: (batch, 12, 17) - validity mask
+                labels: (batch,) - dummy labels (zeros)
         """
         # 1) Align & stack TIFs to common grid
         stacked, lat, lon, desc_lists = align_and_stack_tifs(paths, ref_index=ref_index)
@@ -331,12 +338,37 @@ class PrestoTensorBuilder:
         # 11) Final NaN/Inf cleanup → zero + mask=1
         self._final_nan_mask_inplace(x, mask)
 
-        # 12) Reorder to (12,17,N)
-        x_12_17_N = x.permute(1, 2, 0)
-        mask_12_17_N = mask.permute(1, 2, 0)
-        dw_12_N = dw.permute(1, 0)
+        # 12) Create lat/lon coordinates (N, 2)
+        latlons = torch.from_numpy(
+            np.stack([lat.reshape(-1), lon.reshape(-1)], axis=-1).astype(np.float32)
+        )
 
-        return x_12_17_N, mask_12_17_N, dw_12_N
+        # 13) Dummy labels (not used during inference)
+        labels = torch.zeros((N,), dtype=torch.long)
+
+        # 14) Create dataset
+        # All tensors must have N as first dimension
+        # x: (N, 12, 17)
+        # dw: (N, 12)
+        # latlons: (N, 2)
+        # mask: (N, 12, 17)
+        # labels: (N,)
+        
+        print(f"📊 Tensor shapes before DataLoader:")
+        print(f"   x: {x.shape}")
+        print(f"   dw: {dw.shape}")
+        print(f"   latlons: {latlons.shape}")
+        print(f"   mask: {mask.shape}")
+        print(f"   labels: {labels.shape}")
+        
+        ds = TensorDataset(x, dw, latlons, mask, labels)
+        loader = DataLoader(
+            ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+        )
+
+        return loader
 
     # -----------------------------------------------------------------
     #  Helpers

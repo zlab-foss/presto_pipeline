@@ -83,7 +83,7 @@ class ShapefileTiler:
         if not self.shp_path.exists():
             raise FileNotFoundError(f"Shapefile not found: {self.shp_path}")
 
-        self.pixel_size = float(1)
+        self.pixel_size = float(10)
         self.max_pixels = int(max_pixels)
         self.max_size_m = self.pixel_size * self.max_pixels  # e.g. 25000 m
 
@@ -320,7 +320,7 @@ if __name__ == "__main__":
     
     tiler = ShapefileTiler(
         shp_path="ROI/karkheh.shp",
-        max_pixels=1024,
+        max_pixels=4096,
         temp_dir="tmp_tiles"
     )
     
@@ -331,10 +331,8 @@ if __name__ == "__main__":
         print(f"  Tile index: {item['tile_idx']}")
         print(f"  CRS: {item['crs']}")
         
-        # Your processing code here
-        # process_satellite_data(item['shp_path'])
+
     
     # Cleanup when done
     # tiler.cleanup()
-    
     print("\n" + "=" * 80)
