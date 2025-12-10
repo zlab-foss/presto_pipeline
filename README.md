@@ -83,7 +83,7 @@ configs = {
     "sensor_type": "sentinel",                            # "sentinel" or "landsat"
     "sentinel_bands": ["red", "green", "blue", "nir"],     # Only for Sentinel
     "out_dir": "./data/karkheh",                          # Output root
-    "tile_size": 4026,            # Approx 40km × 40km at 10m → ~16M pixels/tile
+    "tile_size": 1024,            # Approx 1km × 1km at 10m
     "landuse_method": "ESRI",     # "ESRI", "presto", or "skip"
     "device": "cuda",             # "cuda" or "cpu"
     "credentials_path": "./credentials/earthengine_credentials.json",
@@ -96,7 +96,7 @@ configs = {
 | Field              | Description |
 |-------------------|-----------|
 | `sensor_type`      | `"sentinel"` or `"landsat"` |
-| `tile_size`        | Target width/height in pixels (e.g. 4026 ≈ 40km at 10m resolution) |
+| `tile_size`        | Target width/height in pixels (e.g. 1024 ≈ 1km at 10m resolution) |
 | `landuse_method`   | `"ESRI"` = use ESRI cropland mask<br>`"presto"` = future Presto LULC model<br>`"skip"` = no mask (run on all pixels) |
 
 ---
@@ -134,10 +134,10 @@ builder = PrestoTensorBuilder(group_flags={
 
 Returns:
 - `x`: `(N, 12, C)` – input features
-- `dw`: `(N, 12)` – day-of-year weights
+- `dw`: `(N, 12)` 
 - `latlons`: `(N, 2)`
 - `mask`: `(N, 12, C)`
-- `labels`: `(N,)` (if training)
+- `labels`: `(N,)` 
 - Plus spatial shape `(H, W)` to reshape predictions
 
 ### Pre-trained Models (included)
