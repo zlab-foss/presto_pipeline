@@ -357,7 +357,6 @@ def build_masked_dataloader(
 
     return new_loader, valid_idx
 
-
 def process_tile(
     item: Dict,
     configs: Dict,
@@ -373,7 +372,6 @@ def process_tile(
     year = configs["year"]
     sensor_type = configs["sensor_type"].lower()
 
-    # Create tile tag for filename
     if tile_idx is None:
         tile_tag = "full"
     else:
@@ -402,7 +400,6 @@ def process_tile(
             season_year=year,
         )
 
-        # Get full paths
         if sensor_type == "sentinel":
             path_optical = (out_root / "s2" / out_name).resolve()
             path_aux = (out_root / "s1" / out_name).resolve()
@@ -421,7 +418,23 @@ def process_tile(
 
         data_shape = builder.shape  # (H, W)
         H, W = data_shape
+        N = H * W
         print(f"📐 Data shape: {data_shape}")
+
+        # ===== 2b. Fetch per-pixel 'all-NaN' mask from builder =====
+        all_nan_pixels = getattr(builder, "all_nan_pixels", None)
+        if all_nan_pixels is None:
+            # no special handling; treat all pixels as having some data
+            nan_only_mask_flat = np.zeros((N,), dtype=bool)
+        else:
+            if isinstance(all_nan_pixels, torch.Tensor):
+                nan_only_mask_flat = all_nan_pixels.detach().cpu().numpy().astype(bool)
+            else:
+                nan_only_mask_flat = np.asarray(all_nan_pixels, dtype=bool)
+
+        nan_only_mask = nan_only_mask_flat.reshape(H, W)
+        num_nan_only = int(nan_only_mask_flat.sum())
+        print(f"🔎 Pixels with all-NaN input over 12 months: {num_nan_only}")
 
         # ===== 3. Create LULC mask =====
         lulc_mask = create_lulc_mask(
@@ -434,18 +447,25 @@ def process_tile(
                 f"LULC mask shape {lulc_mask.shape} does not match data shape {(H, W)}"
             )
 
+        # ===== 3b. Force all-NaN-input pixels to be excluded from inference =====
+        # These pixels will keep the default output value (0 / nodata).
+        if lulc_mask is not None:
+            lulc_mask = lulc_mask.copy()
+            lulc_mask[nan_only_mask] = 0  # drop from 'valid' pixels
+            print(
+                f"🚫 Marked {num_nan_only} all-NaN-input pixels as nodata in LULC mask."
+            )
+
         # ===== 4. Apply LULC mask BEFORE inference =====
-        # Only pixels with lulc_mask == 1 (cropland) are sent to the model.
-        full_pred = np.zeros((H * W,), dtype=np.uint8)  # default: 0 (nodata/non-crop)
+        full_pred = np.zeros((H * W,), dtype=np.uint8)  # default: 0 (nodata / non-crop)
 
         if lulc_mask is not None:
             flat_mask = lulc_mask.ravel().astype(bool)
             num_valid = int(flat_mask.sum())
 
             if num_valid == 0:
-                # -> No cropland in this tile: skip inference and save all-zero raster
                 print(
-                    "⚠️ No cropland (LULC class 4) pixels in this tile. "
+                    "⚠️ No valid pixels in this tile after LULC+NaN filtering. "
                     "Skipping irrigation inference and saving all-zero raster."
                 )
 
@@ -466,15 +486,12 @@ def process_tile(
                 print(f"✅ Saved empty (all-zero) prediction: {output_path}")
                 return True
 
-            # Mask DataLoader down to only cropland pixels
-            print(f"🔍 Filtering to {num_valid} cropland pixels for irrigation inference")
+            print(f"🔍 Filtering to {num_valid} valid pixels for irrigation inference")
             data_loader, valid_idx = build_masked_dataloader(data_loader, lulc_mask)
         else:
-            # No mask: all pixels are considered valid
             print("ℹ️ No LULC mask in use; running inference on all pixels")
             valid_idx = np.arange(H * W, dtype=np.int64)
 
-        # Sanity: if masked dataloader ended up None (no valid pixels)
         if data_loader is None or len(valid_idx) == 0:
             print(
                 "⚠️ No valid pixels after masking. "
@@ -500,16 +517,13 @@ def process_tile(
         print("🤖 Running irrigation classification...")
         pred = clf.predict(data_loader)
 
-        # Convert to numpy
         if isinstance(pred, torch.Tensor):
             pred = pred.detach().cpu().numpy()
         else:
             pred = np.asarray(pred)
 
-        # Apply label shift (0->1, 1->2, etc.)
-        pred = pred + 1
+        pred = pred + 1  # 0->1, 1->2, ...
 
-        # ===== 6. Rebuild full image =====
         if pred.shape[0] != valid_idx.shape[0]:
             raise RuntimeError(
                 f"Prediction length {pred.shape[0]} does not match "
@@ -518,6 +532,8 @@ def process_tile(
 
         full_pred[valid_idx] = pred.astype(np.uint8)
         full_pred = full_pred.reshape(H, W)
+
+        # all-NaN-input pixels are *not* in valid_idx, so stay 0 (nodata)
 
         # ===== 7. Save result =====
         output_dir = out_root / "predictions"
@@ -540,9 +556,9 @@ def process_tile(
     except Exception as e:
         print(f"❌ Error processing {out_name}: {e}")
         import traceback
-
         traceback.print_exc()
         return False
+
 
 
 def run_pipeline(configs: Dict) -> None:
@@ -632,12 +648,12 @@ if __name__ == "__main__":
         "asset_path": "./ROI/karkheh.shp",
         "credentials_path": "./credentials/earthengine_credentials.json",
         "service_account": "fanapanomaly@fanapanomaly.iam.gserviceaccount.com",
-        "year": 2024,
-        "sensor_type": "sentinel",  # "sentinel" or "landsat"
+        "year": 2004,
+        "sensor_type": "landsat",  # "sentinel" or "landsat"
         "sentinel_bands": ["red", "green", "blue", "nir"],
-        "out_dir": "./data/karkheh",
+        "out_dir": "./data/karkheh_2004_v2",
         "tile_size": 1024,
-        "landuse_method": "ESRI",  # "ESRI", "presto", or "skip"
+        "landuse_method": "skip",  # "ESRI", "presto", or "skip"
         "device": "cuda",  # "cuda" or "cpu"
     }
 

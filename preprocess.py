@@ -182,6 +182,7 @@ class PrestoTensorBuilder:
 
         # Store last (H,W) for debugging / visualization
         self.shape = [None, None]
+        self.all_nan_pixels: torch.Tensor | None = None  # (N,) bool
 
     # -----------------------------------------------------------------
     #  Public entrypoint
@@ -318,6 +319,31 @@ class PrestoTensorBuilder:
             x[..., 16] = torch.from_numpy(ndvi_flat)
         else:
             mask[..., 16] = 1.0
+            
+        
+        # ======================================================
+        # NIR-based "all_nan_pixels":
+        # pixel is True if in NIR band 90% or more of months are NaN
+        # (i.e. valid_fraction <= 0.1)
+        # ======================================================
+        if nir_cube is not None:
+            # nir_cube: (12, H, W)
+            T = nir_cube.shape[0]           # usually 12
+            nir_valid = np.isfinite(nir_cube)    # True where NIR is finite
+            valid_count = nir_valid.sum(axis=0)  # (H, W)
+            valid_fraction = valid_count.astype(np.float32) / float(T)
+
+            # "bad NIR" pixels: ≥90% NaN → valid_fraction <= 0.1
+            bad_nir_mask_hw = valid_fraction <= 0.1   # (H, W) bool
+
+            # flatten to (N,)
+            self.all_nan_pixels = torch.from_numpy(
+                bad_nir_mask_hw.reshape(-1)
+            ).bool()
+        else:
+            # if no NIR available, default to no pixel being flagged
+            self.all_nan_pixels = torch.zeros(N, dtype=torch.bool)
+
 
         # 7) Mask groups that are structurally unavailable based on *effective* flags
         for grp_name, ch_idx_list in BANDS_GROUPS_IDX.items():
