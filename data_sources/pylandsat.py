@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+
 # ----------------------------------------------------------------------
 # Fix PROJ / GDAL environment (important for geopandas / raster stuff)
 # ----------------------------------------------------------------------
@@ -23,8 +24,6 @@ import geedim
 import geopandas as gpd
 
 
-
-
 class LandsatGEEDownloader:
     """
     Download Landsat (8/9, 7, 5) monthly medians for a single ROI as a stacked GeoTIFF.
@@ -34,29 +33,12 @@ class LandsatGEEDownloader:
         * LANDSAT/LC09/C02/T1_L2 (Landsat 9)
         * LANDSAT/LE07/C02/T1_L2 (Landsat 7)
         * LANDSAT/LT05/C02/T1_L2 (Landsat 5)
-    - Chooses sensor based on season_year.
+
     - Outputs 12 × 6 bands: M01_blue, ..., M12_swir2
     - Bands (friendly names):
         ["blue", "green", "red", "nir", "swir1", "swir2"]
-
-    Usage:
-        ls_down = LandsatGEEDownloader(
-            credentials_path="path/to/key.json",
-            service_account="xxx@yyy.iam.gserviceaccount.com",
-            output_dir="./data/gee_inputs_ls",
-            export_scale=30,
-            start_month=9,
-            start_day=1,
-        )
-
-        ls_down.download_from_shapefile(
-            shp_path="./data/ROI/benchmark.shp",
-            out_tif="season2017_benchmark_landsat.tif",
-            season_year=2017,
-        )
     """
 
-    # Fixed friendly band names
     LS_NAMES = ["blue", "green", "red", "nir", "swir1", "swir2"]
 
     def __init__(
@@ -67,6 +49,14 @@ class LandsatGEEDownloader:
         export_scale: int = 30,
         start_month: int = 9,
         start_day: int = 1,
+        # -----------------------------
+        # Gap filling controls
+        # -----------------------------
+        gapfill_enabled: bool = True,
+        gapfill_apply_to_l5: bool = True,   # you asked for L5 too
+        gapfill_window_months: int = 2,     # use +/- N months as temporal fill
+        gapfill_focal_radius_px: float = 2, # last-resort local interpolation radius (pixels)
+        gapfill_focal_iterations: int = 1,
     ):
         # --------------------------------------------------------------
         # AUTH
@@ -85,15 +75,23 @@ class LandsatGEEDownloader:
         self.start_month = start_month
         self.start_day = start_day
 
+        self.gapfill_enabled = gapfill_enabled
+        self.gapfill_apply_to_l5 = gapfill_apply_to_l5
+        self.gapfill_window_months = int(gapfill_window_months)
+        self.gapfill_focal_radius_px = float(gapfill_focal_radius_px)
+        self.gapfill_focal_iterations = int(gapfill_focal_iterations)
+
         print("✅ Landsat downloader ready (bands: blue, green, red, nir, swir1, swir2)")
+        if self.gapfill_enabled:
+            print(
+                f"🩹 Gap-fill enabled: window=±{self.gapfill_window_months} months, "
+                f"focalMean radius={self.gapfill_focal_radius_px}px x{self.gapfill_focal_iterations} iters"
+            )
 
     # ==============================================================
-    # GEOMETRY HELPERS (same pattern as S2/S1)
+    # GEOMETRY HELPERS
     # ==============================================================
     def _load_single_polygon(self, shp_path: str) -> ee.Feature:
-        """
-        Load a shapefile, ensure it has exactly 1 polygon, and convert to ee.Feature.
-        """
         shp_path = Path(shp_path)
         if not shp_path.exists() or not shp_path.is_file():
             raise FileNotFoundError(f"Shapefile not found: {shp_path}")
@@ -101,18 +99,14 @@ class LandsatGEEDownloader:
         gdf = gpd.read_file(shp_path)
         if len(gdf) != 1:
             raise ValueError(
-                f"Shapefile must contain exactly 1 feature (polygon). "
-                f"Found: {len(gdf)}"
+                f"Shapefile must contain exactly 1 feature (polygon). Found: {len(gdf)}"
             )
 
         geom_type = gdf.geometry.iloc[0].geom_type
         if geom_type not in ("Polygon", "MultiPolygon"):
-            raise ValueError(
-                f"Geometry must be Polygon or MultiPolygon, found: {geom_type}"
-            )
+            raise ValueError(f"Geometry must be Polygon or MultiPolygon, found: {geom_type}")
 
         print(f"📁 Loaded ROI from {shp_path} (single polygon, {geom_type}).")
-
         ee_fc = geemap.gdf_to_ee(gdf)
         return ee.Feature(ee_fc.first())
 
@@ -123,10 +117,6 @@ class LandsatGEEDownloader:
         )
 
     def _season_month_to_calendar(self, season_year, m_idx):
-        """
-        Convert 1–12 season month index to (year, month) in calendar,
-        given season start_month (e.g. 9 → Sep).
-        """
         season_year = ee.Number(season_year)
         m_idx = ee.Number(m_idx)
         start_m = ee.Number(self.start_month)
@@ -151,45 +141,33 @@ class LandsatGEEDownloader:
     # LANDSAT SENSOR / BAND SELECTION
     # ==============================================================
     def _get_landsat_collection_and_bands(self, season_year: int):
-        """
-        Pick Landsat collection & band mapping based on season_year.
-
-        Returns:
-            (ee.ImageCollection, band_codes_list)
-        """
-        # L8/L9 (2013+)
         if season_year >= 2013:
-            # Merge L8 + L9 (same band scheme)
             col = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2").merge(
                 ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
             )
             band_codes = ["SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"]
-
-        # L7 (1999–2012)
+            sensor = "L8/9"
         elif season_year >= 1999:
-            # ETM+ SR
             col = ee.ImageCollection("LANDSAT/LE07/C02/T1_L2")
             band_codes = ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7"]
-
-        # Older → L5 SR (you can adjust if you want something else)
+            sensor = "L7"
         else:
             col = ee.ImageCollection("LANDSAT/LT05/C02/T1_L2")
             band_codes = ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7"]
+            sensor = "L5"
 
-        return col, band_codes
+        return col, band_codes, sensor
 
     # ==============================================================
-    # LANDSAT PROCESSING
+    # MASK + SCALE
     # ==============================================================
     def _mask_and_scale(self, img, band_codes):
         """
-        - Use QA_PIXEL to mask clouds & cloud shadows.
-        - Scale SR bands to surface reflectance (0–1-ish).
-          Scale = 0.0000275, offset = -0.2 (Collection 2 L2 convention).
+        Mask clouds & cloud shadows using QA_PIXEL, then scale SR bands:
+        scale=0.0000275, offset=-0.2 (Landsat C2 L2 convention).
         """
         qa = img.select("QA_PIXEL")
-
-        cloud_bit = 1 << 3      # Cloud
+        cloud_bit = 1 << 3         # Cloud
         cloud_shadow_bit = 1 << 4  # Cloud shadow
 
         mask = qa.bitwiseAnd(cloud_bit).eq(0).And(
@@ -197,48 +175,104 @@ class LandsatGEEDownloader:
         )
 
         img_masked = img.updateMask(mask)
-
-        # Select SR bands, apply scale & offset
         sr = img_masked.select(band_codes).multiply(0.0000275).add(-0.2)
+        return sr.rename(self.LS_NAMES)
 
-        # Rename to friendly names
-        sr = sr.rename(self.LS_NAMES)
+    # ==============================================================
+    # GAP FILLING (L7 SLC-OFF style + generic masked-pixel fill)
+    # ==============================================================
+    def _should_gapfill(self, sensor: str) -> bool:
+        if not self.gapfill_enabled:
+            return False
+        if sensor == "L7":
+            return True
+        if sensor == "L5":
+            return bool(self.gapfill_apply_to_l5)
+        return False
 
-        return sr
+    def _gap_fill_image(self, primary: ee.Image, fill: ee.Image) -> ee.Image:
+        """
+        Fill masked pixels in 'primary' using 'fill' (temporal median),
+        then optionally fill any remaining holes using focalMean.
+        """
+        # 1) Temporal fill: replace masked pixels with fill values
+        filled = primary.unmask(fill)
+
+        # 2) Last resort: local interpolation for any remaining masked pixels
+        # (focalMean uses neighborhood stats; can blur, so keep radius small)
+        if self.gapfill_focal_radius_px > 0 and self.gapfill_focal_iterations > 0:
+            interp = filled.focalMean(
+                radius=self.gapfill_focal_radius_px,
+                kernelType="circle",
+                units="pixels",
+                iterations=self.gapfill_focal_iterations,
+            )
+            filled = filled.unmask(interp)
+
+        return filled
 
     def _ls_month(self, roi, season_year, m_idx) -> ee.Image:
-        """
-        Build monthly composite for Landsat (L8/9, 7, or 5) in surface reflectance.
-        """
         start = self._bin_start(season_year, m_idx)
         end = self._bin_end(season_year, m_idx)
 
-        base_col, band_codes = self._get_landsat_collection_and_bands(season_year)
+        base_col, band_codes, sensor = self._get_landsat_collection_and_bands(season_year)
 
         def _prep(img):
             return self._mask_and_scale(img, band_codes)
 
-        col = (
+        month_col = (
             base_col
             .filterBounds(roi)
             .filterDate(start, end)
             .map(_prep)
         )
 
-        # Fallback if nothing available
+        # If no images at all, return fully masked fallback
         fallback = (
             ee.Image.constant([0] * len(self.LS_NAMES))
             .rename(self.LS_NAMES)
-            .selfMask()          # fully masked instead of zeros
+            .selfMask()
             .toFloat()
             .clip(roi)
         )
 
+        primary = ee.Image(
+            ee.Algorithms.If(
+                month_col.size().gt(0),
+                month_col.median().toFloat(),
+                fallback,
+            )
+        ).clip(roi)
+
+        # Gap fill (L7 + optional L5)
+        def _do_fill():
+            # Wider temporal pool (±N months) to exploit non-aligned gaps across scenes
+            w = ee.Number(self.gapfill_window_months)
+            fill_start = start.advance(w.multiply(-1), "month")
+            fill_end = end.advance(w, "month")
+
+            fill_col = (
+                base_col
+                .filterBounds(roi)
+                .filterDate(fill_start, fill_end)
+                .map(_prep)
+            )
+
+            fill_img = ee.Image(
+                ee.Algorithms.If(
+                    fill_col.size().gt(0),
+                    fill_col.median().toFloat(),
+                    fallback,
+                )
+            ).clip(roi)
+
+            return self._gap_fill_image(primary, fill_img).toFloat().clip(roi)
+
         return ee.Image(
             ee.Algorithms.If(
-                col.size().gt(0),
-                col.median().toFloat().clip(roi),
-                fallback,
+                ee.Algorithms.IsEqual(self._should_gapfill(sensor), True),
+                _do_fill(),
+                primary.toFloat().clip(roi),
             )
         )
 
@@ -246,11 +280,6 @@ class LandsatGEEDownloader:
     # BUILD SEASON STACK (12 × 6 bands)
     # ==============================================================
     def create_stack(self, roi, season_year: int) -> ee.Image:
-        """
-        Create 12-month Landsat median stack (surface reflectance)
-        for given ROI and season year.
-        """
-
         def per_month(m):
             ls = self._ls_month(roi, season_year, m)
             return ls.rename(self._rename_with_month(self.LS_NAMES, m))
@@ -258,7 +287,6 @@ class LandsatGEEDownloader:
         images = ee.List.sequence(1, 12).map(per_month)
         stack = ee.ImageCollection.fromImages(images).toBands()
 
-        # Clean band names (same trick as S2/S1)
         old = stack.bandNames()
         new = old.map(lambda n: ee.String(n).split("_").slice(0).join("_"))
         return stack.rename(new).toFloat()
@@ -272,13 +300,6 @@ class LandsatGEEDownloader:
         out_tif: str,
         season_year: int,
     ):
-        """
-        Load a single-polygon shapefile and download the seasonal Landsat stack.
-
-        shp_path    : path to a shapefile with exactly 1 polygon.
-        out_tif     : output filename (full path or relative to output_dir).
-        season_year : integer season year (e.g. 2017).
-        """
         feature = self._load_single_polygon(shp_path)
         roi = feature.geometry()
 
@@ -309,3 +330,6 @@ class LandsatGEEDownloader:
         except Exception as e:
             print(f"❌ [Landsat] Error during download: {e}")
             raise
+
+
+# ======================
