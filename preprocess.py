@@ -11,6 +11,41 @@ from utils.preprocess_utils import interpolate_nan_temporal, _gather_cube
 from torch.utils.data import DataLoader, TensorDataset
 
 # ============================================================
+#  Fixed Percentile and Min-Max Values
+# ============================================================
+
+FIXED_PERCENTILES = {
+    "s2s1_percentiles": {
+        "vv": {"q10": 0.017242368496954444, "q90": 0.10406609922647475},
+        "vh": {"q10": 0.0015369368134997786, "q90": 0.018560633063316342},
+        "red": {"q10": 559.5, "q90": 2486.0},
+        "green": {"q10": 631.9500000000044, "q90": 1902.0},
+        "blue": {"q10": 338.0, "q90": 1400.0},
+        "nir": {"q10": 1804.0, "q90": 4040.0},
+        "coastal": {"q10": 243.5, "q90": 1056.0},
+        "red_edge1": {"q10": 1107.5, "q90": 2775.0},
+        "red_edge2": {"q10": 1589.0, "q90": 3456.0},
+        "red_edge3": {"q10": 1729.0, "q90": 3840.0},
+        "red_edge4": {"q10": 1895.0, "q90": 4071.0},
+        "water_vapor": {"q10": 1966.0, "q90": 4106.5},
+        "swir1": {"q10": 1864.0, "q90": 3868.0},
+        "swir2": {"q10": 1157.0, "q90": 3213.0}
+    },
+    "l8_percentiles": {
+        "blue": {"q10": 0.027947500348091125, "q90": 0.10626749694347382},
+        "green": {"q10": 0.05594249814748764, "q90": 0.15601499378681183},
+        "red": {"q10": 0.03740749880671501, "q90": 0.2044149935245514},
+        "nir": {"q10": 0.1866225004196167, "q90": 0.45777249336242676},
+        "swir1": {"q10": 0.14746250212192535, "q90": 0.3486250042915344},
+        "swir2": {"q10": 0.07128749787807465, "q90": 0.26359501481056213}
+    },
+    "era5_minmax": {
+        "t2m": {"min": -12.109452247619629, "max": 40.341400146484375},
+        "tp": {"min": 2.4831748305587098e-05, "max": 0.4156825542449951}
+    }
+}
+
+# ============================================================
 #  Band / group configuration
 # ============================================================
 
@@ -115,7 +150,7 @@ class PrestoTensorBuilder:
          - min–max normalize (elev, slope) to [0, 1].
       6. Mark structurally unavailable channels in `mask`.
       7. Interpolate NaNs along the time axis (per pixel + channel).
-      8. Apply q10–q90 scaling for selected temporal groups (S1, optical, ERA5).
+      8. Apply FIXED percentile scaling for S1/S2 and min-max scaling for ERA5.
       9. Mask remaining NaN/Inf and zero them.
      10. Return x, mask, dw in shapes:
          - x    : (12, 17, N)
@@ -126,9 +161,8 @@ class PrestoTensorBuilder:
     def __init__(
         self,
         group_flags: Dict[str, bool] | None = None,
-        q_low: float = 10.0,
-        q_high: float = 90.0,
         batch_size: int = 2048,
+        sensor_type: str = "sentinel",
     ):
         """
         Parameters
@@ -143,15 +177,17 @@ class PrestoTensorBuilder:
                 "NDVI": True,
               }
             If None, defaults to GROUP_AVAILABLE.
-        q_low, q_high : float
-            Percentile bounds for robust scaling per channel for
-            *temporal* groups (S1, S2, ERA5).
         batch_size : int
             Batch size for the output DataLoader.
+        sensor_type : str
+            Either "sentinel" or "landsat". Determines which percentile values to use
+            for optical bands. Default is "sentinel".
         """
-        self.q_low = q_low
-        self.q_high = q_high
         self.batch_size = int(batch_size)
+        self.sensor_type = sensor_type.lower()
+        
+        if self.sensor_type not in ["sentinel", "landsat"]:
+            raise ValueError(f"sensor_type must be 'sentinel' or 'landsat', got '{sensor_type}'")
 
         # Merge default availability with user overrides
         base = OrderedDict(GROUP_AVAILABLE)
@@ -167,18 +203,6 @@ class PrestoTensorBuilder:
             for ch in chs:
                 ch2groups.setdefault(ch, []).append(gname)
         self.channel_to_groups = ch2groups
-
-        # Groups that will use percentile scaling (q10–q90).
-        # SRTM is EXCLUDED (it uses custom min–max instead).
-        self.groups_to_scale = {
-            "S1",
-            "S2_RGB",
-            "S2_Red_Edge",
-            "S2_NIR_10m",
-            "S2_NIR_20m",
-            "S2_SWIR",
-            "ERA5",
-        }
 
         # Store last (H,W) for debugging / visualization
         self.shape = [None, None]
@@ -283,7 +307,6 @@ class PrestoTensorBuilder:
 
                 x[..., ch_idx_list[0]] = torch.from_numpy(elev_flat)
                 x[..., ch_idx_list[1]] = torch.from_numpy(slope_flat)
-                # do NOT percentile-scale later (SRTM not in groups_to_scale)
                 continue
 
             # ---------- All other groups: strict monthly ----------
@@ -358,8 +381,8 @@ class PrestoTensorBuilder:
         # 9) Interpolate NaNs along time axis (per pixel+channel)
         x = interpolate_nan_temporal(x)
 
-        # 10) Percentile scaling (q_low–q_high) for selected temporal groups
-        self._scale_percentiles_inplace(x, mask)
+        # 10) Apply FIXED percentile scaling for S1/S2 and min-max for ERA5
+        self._scale_with_fixed_values_inplace(x, mask)
 
         # 11) Final NaN/Inf cleanup → zero + mask=1
         self._final_nan_mask_inplace(x, mask)
@@ -433,9 +456,9 @@ class PrestoTensorBuilder:
         ndvi = np.clip(ndvi, -1.0, 1.0)
         return ndvi.astype(np.float32, copy=False)
 
-    def _scale_percentiles_inplace(self, x: torch.Tensor, mask: torch.Tensor):
+    def _scale_with_fixed_values_inplace(self, x: torch.Tensor, mask: torch.Tensor):
         """
-        Apply q_low–q_high percentile scaling per channel for selected groups.
+        Apply FIXED percentile scaling for S1/S2 bands and min-max scaling for ERA5.
 
         Parameters
         ----------
@@ -446,38 +469,92 @@ class PrestoTensorBuilder:
 
         Notes
         -----
-        - Only channels belonging to groups in `self.groups_to_scale`
-          (and enabled in `group_flags`) are scaled.
-        - SRTM is *not* percentile-normalized; it is handled separately
-          via `_minmax_normalize_srtm`.
+        - S1 bands use sentinel s2s1_percentiles.
+        - Optical bands (RGB, NIR, SWIR) use percentiles based on sensor_type:
+          * "sentinel" -> s2s1_percentiles
+          * "landsat" -> l8_percentiles
+        - Sentinel-specific bands (red_edge1-4, coastal, water_vapor) ONLY scaled 
+          if sensor_type is "sentinel" AND the band is enabled.
+        - ERA5 bands use fixed min/max scaling.
+        - SRTM is already normalized separately.
+        - NDVI is normalized from [-1, 1] to [0, 1].
         """
-        N, T, C = x.shape
-        x_np = x.detach().cpu().numpy()
-        mask_np = mask.detach().cpu().numpy()
+        # Define channel to band name mapping
+        channel_to_band = {
+            0: "vv", 1: "vh",
+            2: "red", 3: "green", 4: "blue",
+            5: "red_edge1", 6: "red_edge2", 7: "red_edge3",
+            8: "nir", 9: "red_edge4",
+            10: "swir1", 11: "swir2",
+            12: "t2m", 13: "tp",
+            # 14, 15: SRTM (already normalized)
+            # 16: NDVI (will be normalized separately)
+        }
+        
+        # Bands that exist in both Sentinel and Landsat
+        common_optical_bands = {"red", "green", "blue", "nir", "swir1", "swir2"}
+        
+        # Bands that only exist in Sentinel-2
+        sentinel_only_bands = {"red_edge1", "red_edge2", "red_edge3", "red_edge4", 
+                               "coastal", "water_vapor"}
+        
+        # Select the appropriate percentile dictionary based on sensor type
+        if self.sensor_type == "sentinel":
+            optical_percentiles = FIXED_PERCENTILES["s2s1_percentiles"]
+        else:  # landsat
+            optical_percentiles = FIXED_PERCENTILES["l8_percentiles"]
 
-        for ch in range(C):
+        for ch, band_name in channel_to_band.items():
             groups = self.channel_to_groups.get(ch, [])
-            # scale only if any scaled group uses this channel and is enabled
-            if not any(
-                self.group_flags.get(g, GROUP_AVAILABLE.get(g, False)) and g in self.groups_to_scale
-                for g in groups
-            ):
-                continue
-
-            valid = (mask_np[..., ch] == 0) & np.isfinite(x_np[..., ch])
-            if not np.any(valid):
-                continue
-
-            vals = x_np[..., ch][valid]
-            q_lo = np.percentile(vals, self.q_low)
-            q_hi = np.percentile(vals, self.q_high)
-
-            if not np.isfinite(q_lo) or not np.isfinite(q_hi) or q_hi <= q_lo:
+            
+            # Check if channel is enabled
+            if not any(self.group_flags.get(g, GROUP_AVAILABLE.get(g, False)) for g in groups):
                 continue
 
             ch_tensor = x[..., ch]
-            ch_tensor.sub_(float(q_lo)).div_(float(q_hi - q_lo))
-            ch_tensor.clamp_(0.0, 1.0)
+            
+            # ERA5 special handling: min-max scaling
+            if band_name in ["t2m", "tp"]:
+                era5_minmax = FIXED_PERCENTILES["era5_minmax"]
+                min_val = era5_minmax[band_name]["min"]
+                max_val = era5_minmax[band_name]["max"]
+                
+                ch_tensor.sub_(float(min_val)).div_(float(max_val - min_val))
+                ch_tensor.clamp_(0.0, 1.0)
+                
+            # S1 bands: always use sentinel percentiles
+            elif band_name in ["vv", "vh"]:
+                q10 = FIXED_PERCENTILES["s2s1_percentiles"][band_name]["q10"]
+                q90 = FIXED_PERCENTILES["s2s1_percentiles"][band_name]["q90"]
+                
+                ch_tensor.sub_(float(q10)).div_(float(q90 - q10))
+                ch_tensor.clamp_(0.0, 1.0)
+            
+            # Sentinel-only bands: only scale if sensor_type is sentinel
+            elif band_name in sentinel_only_bands:
+                if self.sensor_type == "sentinel" and band_name in FIXED_PERCENTILES["s2s1_percentiles"]:
+                    q10 = FIXED_PERCENTILES["s2s1_percentiles"][band_name]["q10"]
+                    q90 = FIXED_PERCENTILES["s2s1_percentiles"][band_name]["q90"]
+                    
+                    ch_tensor.sub_(float(q10)).div_(float(q90 - q10))
+                    ch_tensor.clamp_(0.0, 1.0)
+                # else: leave untouched (will remain as-is or masked)
+            
+            # Common optical bands: use sensor-specific percentiles
+            elif band_name in common_optical_bands:
+                if band_name in optical_percentiles:
+                    q10 = optical_percentiles[band_name]["q10"]
+                    q90 = optical_percentiles[band_name]["q90"]
+                    
+                    ch_tensor.sub_(float(q10)).div_(float(q90 - q10))
+                    ch_tensor.clamp_(0.0, 1.0)
+        
+        # Handle NDVI (channel 16) - normalize from [-1, 1] to [0, 1]
+        if self.group_flags.get("NDVI", GROUP_AVAILABLE.get("NDVI", True)):
+            ndvi_tensor = x[..., 16]
+            # NDVI is already in [-1, 1], normalize to [0, 1]
+            ndvi_tensor.add_(1.0).div_(2.0)
+            ndvi_tensor.clamp_(0.0, 1.0)
 
     @staticmethod
     def _final_nan_mask_inplace(x: torch.Tensor, mask: torch.Tensor):

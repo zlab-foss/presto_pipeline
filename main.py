@@ -172,7 +172,7 @@ def create_presto_builder(sensor_type: str) -> PrestoTensorBuilder:
                     "ERA5": False,
                     "SRTM": False,
                     "NDVI": True,
-                },
+                }, sensor_type='sentinel',
             )
         else:  # landsat
             builder = PrestoTensorBuilder(
@@ -186,7 +186,7 @@ def create_presto_builder(sensor_type: str) -> PrestoTensorBuilder:
                     "ERA5": True,
                     "SRTM": False,
                     "NDVI": True,
-                },
+                },  sensor_type='landsat',
             )
 
         print(f"✅ Created PrestoTensorBuilder for {sensor_type}")
@@ -386,19 +386,22 @@ def process_tile(
         print(f"{'=' * 60}")
 
         # ===== 1. Download imagery =====
-        print("📥 Downloading optical imagery...")
-        dl_optical.download_from_shapefile(
-            shp_path=item["shp_path"],
-            out_tif=out_name,
-            season_year=year,
-        )
-
-        print("📥 Downloading auxiliary data...")
-        dl_aux.download_from_shapefile(
-            shp_path=item["shp_path"],
-            out_tif=out_name,
-            season_year=year,
-        )
+        
+        if configs.get('skip_download', False) == False:
+            print("📥 Downloading optical imagery...")
+            dl_optical.download_from_shapefile(
+                shp_path=item["shp_path"],
+                out_tif=out_name,
+                season_year=year,
+            )
+    
+            print("📥 Downloading auxiliary data...")
+            dl_aux.download_from_shapefile(
+                shp_path=item["shp_path"],
+                out_tif=out_name,
+                season_year=year,
+            )
+            
 
         if sensor_type == "sentinel":
             path_optical = (out_root / "s2" / out_name).resolve()
@@ -610,16 +613,20 @@ def run_pipeline(configs: Dict) -> None:
         fail_count = 0
 
         for idx, item in enumerate(tile_list, 1):
-            print(f"\n📍 Tile {idx}/{total_tiles}")
-
-            success = process_tile(
-                item, configs, dl_optical, dl_aux, builder, clf, out_root
-            )
-
-            if success:
+            if idx < configs.get('tile_idx_resume', -1):
                 success_count += 1
+                continue
             else:
-                fail_count += 1
+                print(f"\n📍 Tile {idx}/{total_tiles}")
+    
+                success = process_tile(
+                    item, configs, dl_optical, dl_aux, builder, clf, out_root
+                )
+    
+                if success:
+                    success_count += 1
+                else:
+                    fail_count += 1
 
         # Summary
         print("\n" + "=" * 60)
@@ -648,13 +655,15 @@ if __name__ == "__main__":
         "asset_path": "./ROI/karkheh.shp",
         "credentials_path": "./credentials/earthengine_credentials.json",
         "service_account": "fanapanomaly@fanapanomaly.iam.gserviceaccount.com",
-        "year": 2004,
-        "sensor_type": "landsat",  # "sentinel" or "landsat"
+        "year": 2024,
+        "sensor_type": "sentinel",  # "sentinel" or "landsat"
         "sentinel_bands": ["red", "green", "blue", "nir"],
-        "out_dir": "./data/karkheh_2004_v2",
+        "out_dir": "./data/karkheh_2024_s2",
         "tile_size": 1024,
-        "landuse_method": "skip",  # "ESRI", "presto", or "skip"
+        "landuse_method": "ESRI",  # "ESRI", "presto", or "skip"
         "device": "cuda",  # "cuda" or "cpu"
+        "tile_idx_resume": -1,
+        "skip_download": False,
     }
 
     try:
