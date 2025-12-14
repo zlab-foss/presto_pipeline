@@ -2,3 +2,7 @@ data/
 *.csv
 credentials/
 *.json
+ROI/
+TEMP/
+__pycache__/
+*.pyc
