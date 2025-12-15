@@ -13,9 +13,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Any
-
-
+from typing import Dict, Optional, Tuple, Any, List, Union
 
 # ---------------------------------------------------------------------
 # Your project imports (adjust module paths if needed)
@@ -105,7 +103,7 @@ def _build_downloader(
     source: str,
     out_dir: Path,
     configs: Dict[str, str],
-    s2_bands: str = "all",
+    s2_bands: Union[str, List[str]] = "all",
 ):
     source = source.lower().strip()
 
@@ -196,9 +194,15 @@ def run_tiled_download(
     out_root: Path,
     temp_dir: Path,
     max_pixels: int = 4096,
-    s2_bands: str = "all",
+    s2_bands: Union[str, List[str]] = "all",
 ) -> None:
     _ensure_shp_exists(shp_path)
+    
+    
+    if s2_bands == ["all"]:
+        s2_bands = "all"
+    else:
+        s2_bands = s2_bands
 
     source = source.lower().strip()
     out_dir = out_root / source
@@ -277,12 +281,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", default="./data/test_outputs", type=str, help="Output root directory")
     p.add_argument("--temp", default="./tmp_tiles", type=str, help="Temp directory for tiled shapefiles")
     p.add_argument("--max_pixels", default=4096, type=int, help="Max pixels for tiler")
-    p.add_argument("--s2_bands", default="all", type=str, help="Sentinel-2 bands: 'all' or your preset")
+    p.add_argument(
+    "--s2-bands",
+    nargs="+",
+    default=["all"],
+    help="Sentinel-2 bands (e.g. red green blue nir) or 'all'",
+)
+
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    
+
 
     run_tiled_download(
         shp_path=Path(args.shp),
