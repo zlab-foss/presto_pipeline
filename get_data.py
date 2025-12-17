@@ -10,7 +10,6 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
-import sys
 import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any, List, Union
@@ -28,7 +27,7 @@ from data_sources.pysatellite import (
     SRTMDownloader,
 )
 
-from shap_tiler import ShapefileTiler
+from shape_tiler import ShapefileTiler
 
 
 # =========================
