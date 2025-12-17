@@ -35,7 +35,7 @@ from shap_tiler import ShapefileTiler
 # DEFAULT CONFIG
 # =========================
 DEFAULT_CONFIGS = {
-    "credentials_path": "./credentials/earthengine_credentials.json",
+    "credentials_path": "./ee-rsai-service-account.json",
     "service_account": "fanapanomaly@fanapanomaly.iam.gserviceaccount.com",
 }
 
@@ -193,7 +193,7 @@ def run_tiled_download(
     source: str,
     out_root: Path,
     temp_dir: Path,
-    max_pixels: int = 4096,
+    max_pixels: int = 1024,
     s2_bands: Union[str, List[str]] = "all",
 ) -> None:
     _ensure_shp_exists(shp_path)
@@ -218,6 +218,8 @@ def run_tiled_download(
     )
 
     total = ok = fail = 0
+    failed_rois: set[int] = set()
+    failed_tiles_by_roi: Dict[int, List[str]] = {}
 
     print(f"\n=== TILED DOWNLOAD START ===")
     print(f"Source      : {source}")
@@ -234,6 +236,7 @@ def run_tiled_download(
         tile_shp = item["shp_path"]
 
         poly_idx, tile_tag = _normalize_tile_id(item, fallback_i=i)
+
 
         print("\nProcessing tile:")
         print(f"  Tile shp     : {tile_shp}")
@@ -258,12 +261,22 @@ def run_tiled_download(
         except Exception as e:
             dt = time.time() - t0
             fail += 1
+            failed_rois.add(poly_idx)
+            failed_tiles_by_roi.setdefault(poly_idx, []).append(tile_tag)
             print(f"  ❌ Failed tile (after {dt:.2f}s): {e}")
 
     print("\n=== SUMMARY ===")
     print(f"Total tiles : {total}")
     print(f"Success     : {ok}")
     print(f"Failed      : {fail}")
+    if failed_rois:
+        failed_sorted = sorted(failed_rois)
+        print(f"Failed ROI poly_idx values ({len(failed_sorted)}): {failed_sorted}")
+        print("Failed tiles by ROI:")
+        for roi_idx in failed_sorted:
+            tiles = failed_tiles_by_roi.get(roi_idx, [])
+            tiles_str = ", ".join(tiles) if tiles else "(unknown tiles)"
+            print(f"  - ROI {roi_idx}: {tiles_str}")
     print("=== DONE ===\n")
 
 
@@ -278,9 +291,9 @@ def parse_args() -> argparse.Namespace:
         choices=["s2", "s1", "landsat", "era5", "esri_lulc", "worldcover", "embedding", "srtm"],
         help="Datasource to download",
     )
-    p.add_argument("--out", default="./data/test_outputs", type=str, help="Output root directory")
+    p.add_argument("--out", default="./data/dataset", type=str, help="Output root directory")
     p.add_argument("--temp", default="./tmp_tiles", type=str, help="Temp directory for tiled shapefiles")
-    p.add_argument("--max_pixels", default=4096, type=int, help="Max pixels for tiler")
+    p.add_argument("--max_pixels", default=1024, type=int, help="Max pixels for tiler")
     p.add_argument(
     "--s2-bands",
     nargs="+",
@@ -289,7 +302,6 @@ def parse_args() -> argparse.Namespace:
 )
 
     return p.parse_args()
-
 
 if __name__ == "__main__":
     args = parse_args()
