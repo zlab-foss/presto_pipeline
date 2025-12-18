@@ -23,6 +23,14 @@ import ee
 import geemap
 import geedim
 import geopandas as gpd
+import json
+
+from shapely.geometry import mapping
+try:
+    from shapely import force_2d as _force_2d
+except Exception:  # pragma: no cover
+    def _force_2d(geom):
+        return geom
 
 
 class S2GEEDownloader:
@@ -138,11 +146,22 @@ class S2GEEDownloader:
             raise FileNotFoundError(f"Shapefile not found: {shp_path}")
 
         gdf = gpd.read_file(shp_path)
+        if gdf.crs is None:
+            raise ValueError(
+                f"Shapefile {shp_path} has no CRS defined (missing/invalid .prj)."
+            )
+
+        # Earth Engine expects lon/lat (EPSG:4326). Also normalize geometry validity.
+        gdf = gdf.copy()
+        gdf["geometry"] = gdf.geometry.make_valid()
+        gdf = gdf[gdf.geometry.notnull() & ~gdf.geometry.is_empty]
         if len(gdf) != 1:
             raise ValueError(
                 f"Shapefile must contain exactly 1 feature (polygon). "
                 f"Found: {len(gdf)}"
             )
+
+        gdf = gdf.to_crs(epsg=4326)
 
         # Optional: check geometry type
         geom_type = gdf.geometry.iloc[0].geom_type
@@ -153,8 +172,50 @@ class S2GEEDownloader:
 
         print(f"📁 Loaded ROI from {shp_path} (single polygon, {geom_type}).")
 
-        ee_fc = geemap.gdf_to_ee(gdf)
-        return ee.Feature(ee_fc.first())
+        last_err: Exception | None = None
+        for tol_m in (0, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000):
+            try:
+                if tol_m > 0:
+                    gdf_try = gdf.to_crs(epsg=3857)
+                    gdf_try["geometry"] = (
+                        gdf_try.geometry.simplify(tol_m, preserve_topology=True)
+                        .make_valid()
+                    )
+
+                    geom_metric = gdf_try.geometry.iloc[0]
+                    if getattr(geom_metric, "geom_type", None) == "MultiPolygon" and getattr(
+                        geom_metric, "geoms", None
+                    ) is not None:
+                        # Prefer the largest part to reduce complexity.
+                        geom_metric = max(geom_metric.geoms, key=lambda gg: gg.area)
+                        gdf_try.at[gdf_try.index[0], "geometry"] = geom_metric
+
+                    gdf_try = gdf_try.to_crs(epsg=4326)
+                else:
+                    gdf_try = gdf
+
+                geom = _force_2d(gdf_try.geometry.iloc[0])
+                geojson = json.loads(json.dumps(mapping(geom)))
+                roi = ee.Geometry(geojson, None, False)
+                return ee.Feature(roi)
+            except Exception as e:
+                last_err = e
+
+        # Last resort: use bounding box so the pipeline can proceed.
+        try:
+            minx, miny, maxx, maxy = gdf.geometry.iloc[0].bounds
+            print(
+                f"⚠️  Warning: falling back to ROI bounding box for {shp_path} "
+                "(polygon too complex for Earth Engine)."
+            )
+            roi = ee.Geometry.Rectangle([minx, miny, maxx, maxy], None, False)
+            return ee.Feature(roi)
+        except Exception:
+            raise RuntimeError(
+                "Failed converting ROI shapefile to an Earth Engine geometry. "
+                "This often happens for extremely detailed admin boundaries. "
+                "Try dissolving/simplifying the ROI, or reduce `max_pixels` so tiles are smaller."
+            ) from last_err
 
     def _rename_with_month(self, base_names, m):
         mtag = ee.Number(m).format("%02d")
@@ -366,11 +427,22 @@ class S1GEEDownloader:
             raise FileNotFoundError(f"Shapefile not found: {shp_path}")
 
         gdf = gpd.read_file(shp_path)
+        if gdf.crs is None:
+            raise ValueError(
+                f"Shapefile {shp_path} has no CRS defined (missing/invalid .prj)."
+            )
+
+        # Earth Engine expects lon/lat (EPSG:4326). Also normalize geometry validity.
+        gdf = gdf.copy()
+        gdf["geometry"] = gdf.geometry.make_valid()
+        gdf = gdf[gdf.geometry.notnull() & ~gdf.geometry.is_empty]
         if len(gdf) != 1:
             raise ValueError(
                 f"Shapefile must contain exactly 1 feature (polygon). "
                 f"Found: {len(gdf)}"
             )
+
+        gdf = gdf.to_crs(epsg=4326)
 
         geom_type = gdf.geometry.iloc[0].geom_type
         if geom_type not in ("Polygon", "MultiPolygon"):
@@ -380,8 +452,48 @@ class S1GEEDownloader:
 
         print(f"📁 Loaded ROI from {shp_path} (single polygon, {geom_type}).")
 
-        ee_fc = geemap.gdf_to_ee(gdf)
-        return ee.Feature(ee_fc.first())
+        last_err: Exception | None = None
+        for tol_m in (0, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000):
+            try:
+                if tol_m > 0:
+                    gdf_try = gdf.to_crs(epsg=3857)
+                    gdf_try["geometry"] = (
+                        gdf_try.geometry.simplify(tol_m, preserve_topology=True)
+                        .make_valid()
+                    )
+
+                    geom_metric = gdf_try.geometry.iloc[0]
+                    if getattr(geom_metric, "geom_type", None) == "MultiPolygon" and getattr(
+                        geom_metric, "geoms", None
+                    ) is not None:
+                        geom_metric = max(geom_metric.geoms, key=lambda gg: gg.area)
+                        gdf_try.at[gdf_try.index[0], "geometry"] = geom_metric
+
+                    gdf_try = gdf_try.to_crs(epsg=4326)
+                else:
+                    gdf_try = gdf
+
+                geom = _force_2d(gdf_try.geometry.iloc[0])
+                geojson = json.loads(json.dumps(mapping(geom)))
+                roi = ee.Geometry(geojson, None, False)
+                return ee.Feature(roi)
+            except Exception as e:
+                last_err = e
+
+        try:
+            minx, miny, maxx, maxy = gdf.geometry.iloc[0].bounds
+            print(
+                f"⚠️  Warning: falling back to ROI bounding box for {shp_path} "
+                "(polygon too complex for Earth Engine)."
+            )
+            roi = ee.Geometry.Rectangle([minx, miny, maxx, maxy], None, False)
+            return ee.Feature(roi)
+        except Exception:
+            raise RuntimeError(
+                "Failed converting ROI shapefile to an Earth Engine geometry. "
+                "This often happens for extremely detailed admin boundaries. "
+                "Try dissolving/simplifying the ROI, or reduce `max_pixels` so tiles are smaller."
+            ) from last_err
 
     def _rename_with_month(self, base_names, m):
         mtag = ee.Number(m).format("%02d")
