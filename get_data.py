@@ -8,26 +8,25 @@ Usage examples:
 """
 
 from __future__ import annotations
-
 import argparse
 import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any, List, Union
 
+
 # ---------------------------------------------------------------------
 # Your project imports (adjust module paths if needed)
 # ---------------------------------------------------------------------
-from data_sources.pysentinel import S2GEEDownloader, S1GEEDownloader
-from data_sources.pylandsat import LandsatGEEDownloader
-from data_sources.pysatellite import (
+from utils.pysentinel import S2GEEDownloader, S1GEEDownloader
+from utils.pylandsat import LandsatGEEDownloader
+from utils.pysatellite import (
     ERA5GEEDownloader,
     EsriLULCMaskDownloader,
     ESAWorldCoverMaskDownloader,
     AlphaEmbeddingDownloader,
     SRTMDownloader,
 )
-
-from shape_tiler import ShapefileTiler
+from utils.shape_tiler import ShapefileTiler
 
 
 # =========================
@@ -299,6 +298,7 @@ def parse_args() -> argparse.Namespace:
     default=["all"],
     help="Sentinel-2 bands (e.g. red green blue nir) or 'all'",
 )
+
 
     return p.parse_args()
 
