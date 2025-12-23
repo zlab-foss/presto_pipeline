@@ -161,7 +161,7 @@ class LandsatGEEDownloader:
     # ==============================================================
     # MASK + SCALE
     # ==============================================================
-    def _mask_and_scale(self, img, band_codes):
+    def _mask(self, img, band_codes):
         """
         Mask clouds & cloud shadows using QA_PIXEL, then scale SR bands:
         scale=0.0000275, offset=-0.2 (Landsat C2 L2 convention).
@@ -175,7 +175,7 @@ class LandsatGEEDownloader:
         )
 
         img_masked = img.updateMask(mask)
-        sr = img_masked.select(band_codes).multiply(0.0000275).add(-0.2)
+        sr = img_masked.select(band_codes)
         return sr.rename(self.LS_NAMES)
 
     # ==============================================================
@@ -218,7 +218,7 @@ class LandsatGEEDownloader:
         base_col, band_codes, sensor = self._get_landsat_collection_and_bands(season_year)
 
         def _prep(img):
-            return self._mask_and_scale(img, band_codes)
+            return self._mask(img, band_codes)
 
         month_col = (
             base_col
