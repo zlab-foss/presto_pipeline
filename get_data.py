@@ -102,6 +102,7 @@ def _build_downloader(
     out_dir: Path,
     configs: Dict[str, str],
     s2_bands: Union[str, List[str]] = "all",
+    worldcover_scale: int = 10,
 ):
     source = source.lower().strip()
 
@@ -122,7 +123,7 @@ def _build_downloader(
     if source == "esri_lulc":
         return EsriLULCMaskDownloader(**common)
     if source == "worldcover":
-        return ESAWorldCoverMaskDownloader(**common)
+        return ESAWorldCoverMaskDownloader(**common, export_scale=worldcover_scale)
     if source == "embedding":
         return AlphaEmbeddingDownloader(**common)
     if source == "srtm":
@@ -193,6 +194,7 @@ def run_tiled_download(
     temp_dir: Path,
     max_pixels: int = 1024,
     s2_bands: Union[str, List[str]] = "all",
+    worldcover_scale: int = 10,
 ) -> None:
     _ensure_shp_exists(shp_path)
     
@@ -207,7 +209,13 @@ def run_tiled_download(
     out_dir.mkdir(parents=True, exist_ok=True)
     temp_dir.mkdir(parents=True, exist_ok=True)
 
-    dl = _build_downloader(source=source, out_dir=out_dir, configs=DEFAULT_CONFIGS, s2_bands=s2_bands)
+    dl = _build_downloader(
+        source=source,
+        out_dir=out_dir,
+        configs=DEFAULT_CONFIGS,
+        s2_bands=s2_bands,
+        worldcover_scale=worldcover_scale,
+    )
 
     tiler = ShapefileTiler(
         shp_path=str(shp_path),
@@ -228,6 +236,8 @@ def run_tiled_download(
     print(f"Max pixels  : {max_pixels}")
     if source == "s2":
         print(f"S2 bands    : {s2_bands}")
+    if source == "worldcover":
+        print(f"WorldCover scale : {worldcover_scale}")
 
     for i, item in enumerate(tiler, 1):
         total += 1
@@ -299,6 +309,13 @@ def parse_args() -> argparse.Namespace:
     help="Sentinel-2 bands (e.g. red green blue nir) or 'all'",
 )
 
+    p.add_argument(
+        "--worldcover-scale",
+        type=int,
+        default=10,
+        help="ESA WorldCover export resolution (meters per pixel). Only used when --source worldcover.",
+    )
+
 
     return p.parse_args()
 
@@ -315,4 +332,5 @@ if __name__ == "__main__":
         temp_dir=Path(args.temp),
         max_pixels=args.max_pixels,
         s2_bands=args.s2_bands,
+        worldcover_scale=args.worldcover_scale,
     )

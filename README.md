@@ -5,6 +5,6 @@ python get_data.py   --shp ./ROI/test-presto-crop.shp   --year 2019   --source s
 python get_data.py   --shp ./ROI/test-presto-crop.shp   --year 2019   --source s2
 python get_data.py   --shp ./ROI/test-lulc.shp   --year 2023   --source s2   --s2-bands red green blue nir
 python get_data.py   --shp ./ROI/test-presto-crop.shp   --year 2019   --source landsat
-python get_data.py   --shp ./ROI/test-presto-crop.shp   --year 2019   --source worldcover
+python get_data.py   --shp ./ROI/test-presto-crop.shp   --year 2021   --source worldcover   --worldcover-scale 10
 
 ```
