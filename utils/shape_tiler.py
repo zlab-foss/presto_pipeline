@@ -1,8 +1,7 @@
-import os
 import math
 import tempfile
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Tuple
+from typing import Dict, Iterator, Tuple
 
 import geopandas as gpd
 from shapely.geometry import box

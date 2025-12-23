@@ -17,9 +17,9 @@ from typing import Dict, Optional, Tuple, Any, List, Union
 # ---------------------------------------------------------------------
 # Your project imports (adjust module paths if needed)
 # ---------------------------------------------------------------------
-from data_sources.pysentinel import S2GEEDownloader, S1GEEDownloader
-from data_sources.pylandsat import LandsatGEEDownloader
-from data_sources.pysatellite import (
+from utils.pysentinel import S2GEEDownloader, S1GEEDownloader
+from utils.pylandsat import LandsatGEEDownloader
+from utils.pysatellite import (
     ERA5GEEDownloader,
     EsriLULCMaskDownloader,
     ESAWorldCoverMaskDownloader,
@@ -27,7 +27,7 @@ from data_sources.pysatellite import (
     SRTMDownloader,
 )
 
-from shape_tiler import ShapefileTiler
+from utils.shape_tiler import ShapefileTiler
 
 
 # =========================
