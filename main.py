@@ -1,12 +1,10 @@
-
-
 from pathlib import Path
 import numpy as np
 import torch
 import math
 from typing import Dict, List, Optional, Tuple
 
-from torch.utils.data import TensorDataset, DataLoader  
+from torch.utils.data import TensorDataset, DataLoader
 
 from shap_tiler import ShapefileTiler
 from data_sources.pysentinel import S1GEEDownloader, S2GEEDownloader
@@ -15,6 +13,7 @@ from data_sources.pysatellite import ERA5GEEDownloader, EsriLULCMaskDownloader
 from preprocess import PrestoTensorBuilder
 from model.presto import PrestoClassifier
 from utils.utils import align_mask_to_image, save_pred_to_tiff
+import rasterio
 
 
 def validate_config(configs: Dict) -> None:
@@ -116,10 +115,7 @@ def get_tile_statistics(tiler: ShapefileTiler) -> Dict:
     try:
         print("📊 Analyzing ROI and calculating tile information...")
 
-        # Count polygons
         num_polygons = len(tiler.gdf_orig)
-
-        # Estimate tiles (this is approximate)
         tile_info = {"num_polygons": num_polygons, "tiles": []}
 
         for poly_idx, (idx, row) in enumerate(tiler.gdf_metric.iterrows()):
@@ -133,7 +129,6 @@ def get_tile_statistics(tiler: ShapefileTiler) -> Dict:
             width_m = maxx - minx
             height_m = maxy - miny
 
-            # Calculate number of tiles needed
             nx = max(1, math.ceil(width_m / tiler.max_size_m))
             ny = max(1, math.ceil(height_m / tiler.max_size_m))
 
@@ -172,13 +167,14 @@ def create_presto_builder(sensor_type: str) -> PrestoTensorBuilder:
                     "ERA5": False,
                     "SRTM": False,
                     "NDVI": True,
-                }, sensor_type='sentinel',
+                },
+                sensor_type="sentinel",
             )
         else:  # landsat
             builder = PrestoTensorBuilder(
                 group_flags={
                     "S1": False,
-                    "S2_RGB": True,   # using RGB-like stack from Landsat
+                    "S2_RGB": True,
                     "S2_Red_Edge": False,
                     "S2_NIR_10m": True,
                     "S2_NIR_20m": False,
@@ -186,7 +182,8 @@ def create_presto_builder(sensor_type: str) -> PrestoTensorBuilder:
                     "ERA5": True,
                     "SRTM": False,
                     "NDVI": True,
-                },  sensor_type='landsat',
+                },
+                sensor_type="landsat",
             )
 
         print(f"✅ Created PrestoTensorBuilder for {sensor_type}")
@@ -201,18 +198,16 @@ def load_model(configs: Dict) -> PrestoClassifier:
     sensor_type = configs["sensor_type"].lower()
 
     try:
-        # Determine device
         want_cuda = configs.get("device", "cpu") == "cuda"
         device = torch.device("cuda" if (want_cuda and torch.cuda.is_available()) else "cpu")
 
-        # Select model path
         if sensor_type == "sentinel":
             sentinel_bands = configs.get("sentinel_bands", ["red", "green", "blue", "nir"])
             if set(sentinel_bands) == {"red", "green", "blue", "nir"}:
                 model_path = "./weights/irrigation/Presto_S2RGBNIR_S1.pth"
             else:
                 model_path = "./weights/irrigation/Presto_S2Full_S1.pth"
-        else:  # landsat
+        else:
             model_path = "./weights/irrigation/Presto_L8_ERA5.pth"
 
         clf = PrestoClassifier.load(model_path, device=device)
@@ -238,41 +233,57 @@ def create_lulc_mask(
     """
     Create land use/land cover mask based on configuration.
 
-    ESRI behavior:
-    - ESRI LULC is downloaded at native 10m.
-    - `align_mask_to_image` resamples it onto the optical grid:
-        * Sentinel-2: 10m (no resolution change)
-        * Landsat-8: 30m (downsample 10m → 30m)
-    - Output mask is binary, with 1 for cropland (class 4), else 0.
+    Caching behavior (applies regardless of skip_download):
+      - If aligned tif exists -> reuse (skip align + download)
+      - Else if raw tif exists -> reuse raw and align
+      - Else -> download raw, then align
+
+    This matches: "first check if file exist, if not download it, if present skipped".
     """
     landuse_method = configs.get("landuse_method", "skip")
     year = configs["year"]
 
     try:
         if landuse_method == "ESRI" and 2017 <= year <= 2024:
-            print("📥 Downloading ESRI LULC data...")
+            esri_dir = out_root / "esri_lulc"
+            esri_dir.mkdir(parents=True, exist_ok=True)
 
-            dl_lulc = EsriLULCMaskDownloader(
-                credentials_path=configs["credentials_path"],
-                service_account=configs["service_account"],
-                output_dir=out_root / "esri_lulc",
-            )
+            path_lulc_raw = (esri_dir / out_name).resolve()
+            path_lulc_aligned = (esri_dir / f"aligned_{out_name}").resolve()
 
-            dl_lulc.download_from_shapefile(
-                shp_path=item["shp_path"],
-                out_tif=out_name,
-                year=year,
-            )
+            # 1) If aligned exists, use it
+            if path_lulc_aligned.exists():
+                print(f"♻️  LULC aligned exists, skipping download+align: {path_lulc_aligned}")
+                with rasterio.open(path_lulc_aligned) as ds:
+                    mask_data = ds.read(1)
 
-            path_lulc = (out_root / "esri_lulc" / out_name).resolve()
+            else:
+                # 2) If raw exists, skip download, just align
+                if path_lulc_raw.exists():
+                    print(f"♻️  LULC raw exists, skipping download: {path_lulc_raw}")
+                else:
+                    # 3) Otherwise download raw
+                    print("📥 Downloading ESRI LULC data...")
+                    dl_lulc = EsriLULCMaskDownloader(
+                        credentials_path=configs["credentials_path"],
+                        service_account=configs["service_account"],
+                        output_dir=esri_dir,
+                    )
+                    dl_lulc.download_from_shapefile(
+                        shp_path=item["shp_path"],
+                        out_tif=out_name,
+                        year=year,
+                    )
+                    if not path_lulc_raw.exists():
+                        raise RuntimeError(f"ESRI download finished but file not found: {path_lulc_raw}")
 
-            # Align LULC mask to optical image grid
-            mask_data = align_mask_to_image(path_optical, path_lulc, path_lulc)
+                # Align to optical grid and cache aligned
+                print(f"🧭 Aligning LULC to optical grid -> {path_lulc_aligned.name}")
+                mask_data = align_mask_to_image(path_optical, path_lulc_raw, path_lulc_aligned)
 
-            # Create binary mask: 1 for cropland (class 4), 0 otherwise
+            # Binary cropland mask: ESRI class 4
             lulc_mask = (mask_data == 4).astype(np.uint8)
 
-            # Safety check on shape
             H, W = data_shape
             if lulc_mask.shape != (H, W):
                 raise RuntimeError(
@@ -287,7 +298,7 @@ def create_lulc_mask(
         elif landuse_method == "presto":
             raise NotImplementedError("Presto-based LULC classification not yet implemented")
 
-        else:  # "skip" or unknown -> use all pixels
+        else:
             print("⏭️  Skipping LULC mask (processing all pixels)")
             H, W = data_shape
             return np.ones((H, W), dtype=np.uint8)
@@ -326,7 +337,6 @@ def build_masked_dataloader(
     num_valid = int(valid_idx.size)
 
     if num_valid == 0:
-        # No cropland pixels
         return None, valid_idx
 
     if not hasattr(data_loader, "dataset"):
@@ -340,22 +350,17 @@ def build_masked_dataloader(
 
     tensors = ds.tensors
     idx_tensor = torch.as_tensor(valid_idx, dtype=torch.long)
-
     masked_tensors = tuple(t.index_select(0, idx_tensor) for t in tensors)
 
     batch_size = getattr(data_loader, "batch_size", None)
     if batch_size is None:
-        # Fallback: keep everything in a single batch if not specified
         batch_size = num_valid
 
     new_ds = TensorDataset(*masked_tensors)
-    new_loader = DataLoader(
-        new_ds,
-        batch_size=batch_size,
-        shuffle=False,
-    )
+    new_loader = DataLoader(new_ds, batch_size=batch_size, shuffle=False)
 
     return new_loader, valid_idx
+
 
 def process_tile(
     item: Dict,
@@ -366,7 +371,7 @@ def process_tile(
     clf: PrestoClassifier,
     out_root: Path,
 ) -> bool:
-    """Process a single tile: download, build tensor, predict, save."""
+    """Process a single tile: download (if needed), build tensor, predict, save."""
     poly_idx = item["poly_idx"]
     tile_idx = item["tile_idx"]
     year = configs["year"]
@@ -385,30 +390,42 @@ def process_tile(
         print(f"Processing: {out_name}")
         print(f"{'=' * 60}")
 
-        # ===== 1. Download imagery =====
-        
-        if configs.get('skip_download', False) == False:
-            print("📥 Downloading optical imagery...")
-            dl_optical.download_from_shapefile(
-                shp_path=item["shp_path"],
-                out_tif=out_name,
-                season_year=year,
-            )
-    
-            print("📥 Downloading auxiliary data...")
-            dl_aux.download_from_shapefile(
-                shp_path=item["shp_path"],
-                out_tif=out_name,
-                season_year=year,
-            )
-            
-
+        # ===== 1. Resolve expected paths =====
         if sensor_type == "sentinel":
             path_optical = (out_root / "s2" / out_name).resolve()
             path_aux = (out_root / "s1" / out_name).resolve()
         else:
             path_optical = (out_root / "landsat" / out_name).resolve()
             path_aux = (out_root / "era5" / out_name).resolve()
+
+        # ===== 1b. Download imagery (skip if exists) =====
+        skip_download = bool(configs.get("skip_download", False))
+
+        # Optical
+        if skip_download and path_optical.exists():
+            print(f"♻️  Optical exists, skipping download: {path_optical}")
+        else:
+            print("📥 Downloading optical imagery...")
+            dl_optical.download_from_shapefile(
+                shp_path=item["shp_path"],
+                out_tif=out_name,
+                season_year=year,
+            )
+            if not path_optical.exists():
+                raise RuntimeError(f"Optical download finished but file not found: {path_optical}")
+
+        # Aux
+        if skip_download and path_aux.exists():
+            print(f"♻️  Aux exists, skipping download: {path_aux}")
+        else:
+            print("📥 Downloading auxiliary data...")
+            dl_aux.download_from_shapefile(
+                shp_path=item["shp_path"],
+                out_tif=out_name,
+                season_year=year,
+            )
+            if not path_aux.exists():
+                raise RuntimeError(f"Aux download finished but file not found: {path_aux}")
 
         # ===== 2. Build Presto tensor =====
         print("🔨 Building Presto tensor...")
@@ -427,7 +444,6 @@ def process_tile(
         # ===== 2b. Fetch per-pixel 'all-NaN' mask from builder =====
         all_nan_pixels = getattr(builder, "all_nan_pixels", None)
         if all_nan_pixels is None:
-            # no special handling; treat all pixels as having some data
             nan_only_mask_flat = np.zeros((N,), dtype=bool)
         else:
             if isinstance(all_nan_pixels, torch.Tensor):
@@ -439,25 +455,21 @@ def process_tile(
         num_nan_only = int(nan_only_mask_flat.sum())
         print(f"🔎 Pixels with all-NaN input over 12 months: {num_nan_only}")
 
-        # ===== 3. Create LULC mask =====
+        # ===== 3. Create LULC mask (with caching / skip-if-exists) =====
         lulc_mask = create_lulc_mask(
             configs, item, out_name, out_root, data_shape, path_optical
         )
 
-        # Ensure mask shape is right
         if lulc_mask is not None and lulc_mask.shape != (H, W):
             raise RuntimeError(
                 f"LULC mask shape {lulc_mask.shape} does not match data shape {(H, W)}"
             )
 
-        # ===== 3b. Force all-NaN-input pixels to be excluded from inference =====
-        # These pixels will keep the default output value (0 / nodata).
+        # ===== 3b. Exclude all-NaN-input pixels from inference =====
         if lulc_mask is not None:
             lulc_mask = lulc_mask.copy()
-            lulc_mask[nan_only_mask] = 0  # drop from 'valid' pixels
-            print(
-                f"🚫 Marked {num_nan_only} all-NaN-input pixels as nodata in LULC mask."
-            )
+            lulc_mask[nan_only_mask] = 0
+            print(f"🚫 Marked {num_nan_only} all-NaN-input pixels as nodata in LULC mask.")
 
         # ===== 4. Apply LULC mask BEFORE inference =====
         full_pred = np.zeros((H * W,), dtype=np.uint8)  # default: 0 (nodata / non-crop)
@@ -496,10 +508,7 @@ def process_tile(
             valid_idx = np.arange(H * W, dtype=np.int64)
 
         if data_loader is None or len(valid_idx) == 0:
-            print(
-                "⚠️ No valid pixels after masking. "
-                "Saving all-zero raster and skipping inference."
-            )
+            print("⚠️ No valid pixels after masking. Saving all-zero raster and skipping inference.")
             full_pred = full_pred.reshape(H, W)
             output_dir = out_root / "predictions"
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -536,8 +545,6 @@ def process_tile(
         full_pred[valid_idx] = pred.astype(np.uint8)
         full_pred = full_pred.reshape(H, W)
 
-        # all-NaN-input pixels are *not* in valid_idx, so stay 0 (nodata)
-
         # ===== 7. Save result =====
         output_dir = out_root / "predictions"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -559,9 +566,9 @@ def process_tile(
     except Exception as e:
         print(f"❌ Error processing {out_name}: {e}")
         import traceback
+
         traceback.print_exc()
         return False
-
 
 
 def run_pipeline(configs: Dict) -> None:
@@ -571,19 +578,15 @@ def run_pipeline(configs: Dict) -> None:
     print("=" * 60 + "\n")
 
     try:
-        # Validate configuration
         print("🔍 Validating configuration...")
         validate_config(configs)
 
-        # Setup directories
         out_root = Path(configs["out_dir"])
         setup_directories(out_root)
 
-        # Initialize components
         dl_optical, dl_aux = initialize_downloaders(configs, out_root)
         tiler = initialize_tiler(configs)
 
-        # Get tile statistics
         tile_stats = get_tile_statistics(tiler)
         estimated_total = sum(t["total"] for t in tile_stats["tiles"])
 
@@ -600,35 +603,31 @@ def run_pipeline(configs: Dict) -> None:
         builder = create_presto_builder(configs["sensor_type"].lower())
         clf = load_model(configs)
 
-        # Count total tiles first
         print("\n📊 Counting total tiles...")
         tile_list = list(tiler)
         total_tiles = len(tile_list)
         print(f"✅ Found {total_tiles} tiles to process\n")
 
-        # Process tiles
         print("\n🔄 Starting tile processing...\n")
-
         success_count = 0
         fail_count = 0
 
         for idx, item in enumerate(tile_list, 1):
-            if idx < configs.get('tile_idx_resume', -1):
+            if idx < configs.get("tile_idx_resume", -1):
                 success_count += 1
                 continue
             else:
                 print(f"\n📍 Tile {idx}/{total_tiles}")
-    
+
                 success = process_tile(
                     item, configs, dl_optical, dl_aux, builder, clf, out_root
                 )
-    
+
                 if success:
                     success_count += 1
                 else:
                     fail_count += 1
 
-        # Summary
         print("\n" + "=" * 60)
         print("🏁 Pipeline Complete!")
         print("=" * 60)
@@ -648,22 +647,20 @@ def run_pipeline(configs: Dict) -> None:
 # =============================================================================
 # Main Execution
 # =============================================================================
-
 if __name__ == "__main__":
-    # User Configuration
     configs = {
-        "asset_path": "./ROI/karkheh.shp",
+        "asset_path": "./ROI/test/patches_season_99_400.shp",
         "credentials_path": "./credentials/earthengine_credentials.json",
         "service_account": "fanapanomaly@fanapanomaly.iam.gserviceaccount.com",
-        "year": 2024,
+        "year": 2020,
         "sensor_type": "sentinel",  # "sentinel" or "landsat"
         "sentinel_bands": ["red", "green", "blue", "nir"],
-        "out_dir": "./data/karkheh_2024_s2",
-        "tile_size": 1024,
+        "out_dir": "./data/test_results/v2",
+        "tile_size": 2024,
         "landuse_method": "ESRI",  # "ESRI", "presto", or "skip"
         "device": "cuda",  # "cuda" or "cpu"
         "tile_idx_resume": -1,
-        "skip_download": False,
+        "skip_download": False,  # if True: skip any download when the expected tif already exists
     }
 
     try:

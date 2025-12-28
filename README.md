@@ -6,7 +6,7 @@ This repository provides an **end-to-end pipeline** for generating **pixel-level
 The pipeline:
 - Tiles large Areas of Interest (AOIs) from a shapefile
 - Downloads **Sentinel-2 + Sentinel-1** or **Landsat-8 + ERA5** data via Google Earth Engine
-- Optionally applies the **ESRI 2020 Land Use/Land Cover (10m)** map as a cropland mask
+- Optionally applies the **ESRI Land Use/Land Cover (10m)** map as a cropland mask
 - Builds **Presto-ready spatiotemporal tensors** (12-month sequences)
 - Runs a pre-trained **Presto irrigation classifier**
 - Exports predictions as **GeoTIFFs** perfectly aligned with input imagery
@@ -78,17 +78,27 @@ Edit the `configs` dictionary in `main.py` or pass your own:
 
 ```python
 configs = {
-    "asset_path": "./ROI/karkheh.shp",                    # Input AOI shapefile
-    "year": 2024,                                         # Target year
-    "sensor_type": "sentinel",                            # "sentinel" or "landsat"
-    "sentinel_bands": ["red", "green", "blue", "nir"],     # Only for Sentinel
-    "out_dir": "./data/karkheh",                          # Output root
-    "tile_size": 1024,            # Approx 1km × 1km at 10m
-    "landuse_method": "ESRI",     # "ESRI", "presto", or "skip"
-    "device": "cuda",             # "cuda" or "cpu"
+    "asset_path": "./ROI/karkheh.shp",   # Input AOI shapefile
+    "year": 2024,                        # Target year
+    "sensor_type": "sentinel",           # "sentinel" or "landsat"
+
+    # Sentinel-specific options
+    "sentinel_bands": ["red", "green", "blue", "nir"],
+
+    "out_dir": "./data/karkheh",          # Output directory
+    "tile_size": 1024,                   # ~1 km × 1 km at 10 m resolution
+
+    # Land-use masking strategy
+    "landuse_method": "ESRI",             # "ESRI", "presto", or "skip"
+
+    # Runtime options
+    "device": "cuda",                    # "cuda" or "cpu"
+
+    # Google Earth Engine credentials
     "credentials_path": "./credentials/earthengine_credentials.json",
     "service_account": "your-service-account@project.iam.gserviceaccount.com",
 }
+
 ```
 
 ### Important Config Options
@@ -196,9 +206,7 @@ Use GDAL or rasterio to mosaic tiles afterward:
 
 ---
 
-## License
 
-MIT License (or specify your own)
 
 
 

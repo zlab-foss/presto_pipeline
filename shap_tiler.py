@@ -319,8 +319,8 @@ if __name__ == "__main__":
     print("=" * 80)
     
     tiler = ShapefileTiler(
-        shp_path="ROI/karkheh.shp",
-        max_pixels=4096,
+        shp_path="ROI/non_overlapped_area.shp",
+        max_pixels=1024,
         temp_dir="tmp_tiles"
     )
     
