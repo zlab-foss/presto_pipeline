@@ -518,16 +518,34 @@ class PrestoClassifier(BaseEstimator, ClassifierMixin):
         self.encoder.eval()
         self.head.eval()
         device = torch.device(self.device)
+    
         preds = []
+        confs = []   # <-- collect confidence
+    
         for sample in tqdm(data_loader, desc="Predict"):
             X, DW, LL, MK, _, M = self._batch_unpack(sample, device)
             logits = self._forward_logits(X, DW, LL, MK, M)
+    
             if self.num_classes == 1:
-                y = (torch.sigmoid(logits.squeeze(1)) >= 0.5).long()
+                probs = torch.sigmoid(logits.squeeze(1))          # (B,)
+                y = (probs >= 0.5).long()
+                confs.append(probs.cpu().numpy())                 # confidence = P(class=1)
             else:
-                y = torch.argmax(logits, dim=1).long()
+                probs = torch.softmax(logits, dim=1)              # (B, C)
+                conf, y = torch.max(probs, dim=1)                 # max prob = confidence
+                confs.append(conf.cpu().numpy())
+    
             preds.append(y.cpu().numpy())
-        return np.concatenate(preds, axis=0)
+    
+        preds = np.concatenate(preds, axis=0)
+        confs = np.concatenate(confs, axis=0)
+    
+        # ---- print mean confidence ----
+        mean_conf = float(confs.mean()) if confs.size > 0 else float("nan")
+        print(f"📊 Mean prediction confidence: {mean_conf:.4f}")
+    
+        return preds
+
 
     @torch.no_grad()
     def predict_proba(self, data_loader: DataLoader) -> np.ndarray:

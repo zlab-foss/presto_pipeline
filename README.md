@@ -72,9 +72,9 @@ ee.Initialize()  # Uses default credentials (e.g., gcloud auth)
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ **Configuration**
 
-Edit the `configs` dictionary in `main.py` or pass your own:
+Edit the `configs` dictionary in `main.py`, or provide your own configuration:
 
 ```python
 configs = {
@@ -98,8 +98,20 @@ configs = {
     "credentials_path": "./credentials/earthengine_credentials.json",
     "service_account": "your-service-account@project.iam.gserviceaccount.com",
 }
-
 ```
+
+### 🔁 **Execution Controls**
+
+* **`skip_download = True`**
+  Skips the data download step if all required inputs already exist and runs inference directly.
+
+* **`tile_idx`**
+
+  * `tile_idx = -1` → start processing from the first tile
+  * `tile_idx = 50` → resume processing from tile index 50
+
+These options are useful for **resuming interrupted runs** or **debugging specific tiles**.
+
 
 ### Important Config Options
 
