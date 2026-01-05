@@ -448,7 +448,8 @@ class S1GEEDownloader:
             col_db = col_db.filter(ee.Filter.eq("orbitProperties_pass", self.orbit_pass))
 
         # Convert each image from dB to linear
-        col_lin = col_db.map(self._db_to_linear)
+        # col_lin = col_db.map(self._db_to_linear)
+        col_lin = col_db
 
         # Fallback image if no scenes
         fallback = (
