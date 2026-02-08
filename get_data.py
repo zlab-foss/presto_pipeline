@@ -280,7 +280,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--out", default="./data/test_outputs", type=str, help="Output root directory")
     p.add_argument("--temp", default="./tmp_tiles", type=str, help="Temp directory for tiled shapefiles")
-    p.add_argument("--max_pixels", default=1024, type=int, help="Max pixels for tiler")
+    p.add_argument("--max_pixels", default=4096, type=int, help="Max pixels for tiler")
     p.add_argument(
     "--s2-bands",
     nargs="+",

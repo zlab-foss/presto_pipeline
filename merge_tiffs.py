@@ -193,15 +193,15 @@ def merge_tiffs(config: dict) -> Path:
 if __name__ == "__main__":
 
     # for region in ['anzali', 'karkheh', 'gavkhoni', 'urmia']:
-    for region in ['anzali']:
+    for region in ['anzali', 'karkheh', 'urmia']:
         for year in [2024]:
             # for cls_type in ['irrigation', 'lulc']:
             for cls_type in ['irrigation']:
 
                 config = {
-                    "in_dir": f"./data/export/{cls_type}/{region}_{year}_sentinel",
-                    "out_dir": f"./data/{region}/{cls_type}_sentinel",
-                    "out_name": f"{region}_{year}_v2.tif",
+                    "in_dir": f"./data/export/{cls_type}/{region}_{year}",
+                    "out_dir": f"./data/{region}/{cls_type}",
+                    "out_name": f"{region}_{year}_sentinel.tif",
                     "dtype": "int16",
 
                     # nodata normalization (your rule)

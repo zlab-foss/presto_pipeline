@@ -30,14 +30,14 @@ def pick_landuse(year: int) -> str:
 # Standardized run plan (ALL entries have the same keys)
 # ---------------------------------------------------------------------
 to_run = {
-    # "oroumieh": {
-    #     "region_name": "oroumieh",
-    #     "asset_path": "./ROI/wetlands/oroumieh.shp",
-    #     "sensor_type": ["landsat"],
-    #     "year": [2024],
-    #     "tile_idx_resume": 390,
-    #     "skip_download": False,
-    # },
+    "oroumieh": {
+        "region_name": "oroumieh",
+        "asset_path": "./ROI/wetlands/oroumieh.shp",
+        "sensor_type": ["landsat"],
+        "year": [2024],
+        "tile_idx_resume": 390,
+        "skip_download": False,
+    },
 
     "anzali": {
         "region_name": "anzali",
@@ -57,33 +57,6 @@ to_run = {
         "skip_download": True,
     },
 
-    "non_overlapped_area": {
-        "region_name": "non_overlapped_area",
-        "asset_path": "./ROI/non_overlapped_area.shp",
-        "sensor_type": ["sentinel"],
-        "year": [2024],
-        "tile_idx_resume": -1,
-        "skip_download": True,
-    },
-
-
-    "test_2018": {
-        "region_name": "test",
-        "asset_path": "./ROI/test/patches_season_97_98.shp",
-        "sensor_type": ["sentinel"],
-        "year": [2018],
-        "tile_idx_resume": -1,
-        "skip_download": True,
-    },
-
-    "test_2020": {
-        "region_name": "test",
-        "asset_path": "./ROI/test/patches_season_99_400.shp",
-        "sensor_type": ["sentinel"],
-        "year": [2020],
-        "tile_idx_resume": -1,
-        "skip_download": True,
-    },
 }
 
 
@@ -99,18 +72,18 @@ def main():
             landuse_method = pick_landuse(year)
 
             for sensor_type in cfg["sensor_type"]:
-                out_dir = f"./data/{region_name}_{year}_{sensor_type}"
+                out_dir = f"./data/{region_name}/{year}/{sensor_type}/"
 
                 configs = {
                     "asset_path": asset_path,
-                    "credentials_path": "./credentials/earthengine_credentials.json",
-                    "service_account": "fanapanomaly@fanapanomaly.iam.gserviceaccount.com",
+                    "credentials_path": "./credentials/earthengine_credentials (1).json",
+                    "service_account": "get-data@ardent-window-473507-c5.iam.gserviceaccount.com",
                     "year": year,
                     "sensor_type": sensor_type,
                     "sentinel_bands": ["red", "green", "blue", "nir"],
                     "out_dir": out_dir,
-                    "tile_size": 1024,
-                    "landuse_method": landuse_method,
+                    "tile_size": 2048,
+                    "landuse_method": 'skip',
                     "device": "cuda",
                     "skip_download": cfg["skip_download"],
                     "tile_idx_resume": cfg["tile_idx_resume"],

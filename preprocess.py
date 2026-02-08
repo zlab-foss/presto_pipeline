@@ -4,35 +4,24 @@ import re
 import numpy as np
 import torch
 from pathlib import Path
-from typing import Sequence, Dict, List, Tuple
-from collections import OrderedDict
+from typing import Sequence, Dict, List, Tuple, Optional
+from torch.utils.data import DataLoader, TensorDataset
 
 from utils.utils import align_and_stack_tifs
 from utils.preprocess_utils import interpolate_nan_temporal, _gather_cube
-from torch.utils.data import DataLoader, TensorDataset
 
 
 # ============================================================
-#  Fixed Z-Score (mu/std) Values  (MATCH TRAIN)
+#  FIXED_ZSCORE: (min, max)  (MATCH PrestoProcessor)
 # ============================================================
 FIXED_ZSCORE: Dict[str, Dict[str, Tuple[float, float]]] = {
     "sentinel": {
-        "red": (0.0, 1000.0),
-        "green": (0.0, 1000.0),
-        "blue": (0.0, 1000.0),
-        "nir": (0.0, 1000.0),
-        "swir1": (0.0, 1000.0),
-        "swir2": (0.0, 1000.0),
-        "red_edge1": (0.0, 1000.0),
-        "red_edge2": (0.0, 1000.0),
-        "red_edge3": (0.0, 1000.0),
-        "red_edge4": (0.0, 1000.0),
-        "coastal": (0.0, 1000.0),
-        "water_vapor": (0.0, 1000.0),
+        "red": (0.0, 10000.0),
+        "green": (0.0, 10000.0),
+        "blue": (0.0, 10000.0),
+        "nir": (0.0, 10000.0),
         "vv": (0.0, 0.1),
         "vh": (0.0, 0.1),
-        "t2m": (0.0, 20.0),
-        "tp": (0.0, 0.05),
     },
     "landsat": {
         "blue": (0.0, 0.2),
@@ -46,117 +35,23 @@ FIXED_ZSCORE: Dict[str, Dict[str, Tuple[float, float]]] = {
     },
 }
 
+# band desc pattern: "M01_red" or "0_M01_red"
+_MONTH_BAND_RE = re.compile(r"^(?:\d+_)?M(\d{2})_(.+)$", re.IGNORECASE)
 
-# ============================================================
-#  Band / group configuration
-# ============================================================
-_MONTH_BAND_RE = re.compile(r"^(?:\d+_)?M(\d{2})_(.+)$")
-
-BANDS_GROUPS_IDX: Dict[str, List[int]] = OrderedDict(
-    [
-        ("S1", [0, 1]),
-        ("S2_RGB", [2, 3, 4]),
-        ("S2_Red_Edge", [5, 6, 7]),
-        ("S2_NIR_10m", [8]),
-        ("S2_NIR_20m", [9]),
-        ("S2_SWIR", [10, 11]),
-        ("ERA5", [12, 13]),
-        ("SRTM", [14, 15]),
-        ("NDVI", [16]),
-    ]
-)
-
-GROUP_AVAILABLE: Dict[str, bool] = OrderedDict(
-    [
-        ("S1", True),
-        ("S2_RGB", True),
-        ("S2_Red_Edge", True),
-        ("S2_NIR_10m", True),
-        ("S2_NIR_20m", True),
-        ("S2_SWIR", True),
-        ("ERA5", False),
-        ("SRTM", False),
-        ("NDVI", True),
-    ]
-)
-
-GROUP_BANDS_ORDER: Dict[str, List[str]] = OrderedDict(
-    [
-        ("S1", ["vv", "vh"]),
-        ("S2_RGB", ["red", "green", "blue"]),
-        ("S2_Red_Edge", ["red_edge1", "red_edge2", "red_edge3"]),
-        ("S2_NIR_10m", ["nir"]),
-        ("S2_NIR_20m", ["red_edge4"]),
-        ("S2_SWIR", ["swir1", "swir2"]),
-        ("ERA5", ["t2m", "tp"]),
-        ("SRTM", ["elevation", "slope"]),
-        ("NDVI", []),
-    ]
-)
+# Presto structural mask behavior (match your PrestoProcessor "structural-only" variant)
+_ALWAYS_MASK = {5, 6, 7, 9, 14, 15}     # always inactive
+_L8_ONLY = {10, 11, 12, 13}             # swir + era5 slots
 
 
-# ============================================================
-#  Your clipping function (UNCHANGED)
-# ============================================================
-S2_RGBNIR = ["red", "green", "blue", "nir"]
-S2_FULL = [
-    "coastal", "blue", "green", "red", "red_edge1", "red_edge2", "red_edge3",
-    "nir", "red_edge4", "water_vapor", "swir1", "swir2",
-]
-S1_VV_VH = ["vv", "vh"]
-LSAT_BANDS = ["blue", "green", "red", "nir", "swir1", "swir2"]
-ERA5_BANDS = ["t2m", "tp"]
-
-S2_ALL_BANDS = set(S2_FULL)
-S2_RGBNIR_SET = set(S2_RGBNIR)
-S1_SET = set(S1_VV_VH)
-LSAT_SET = set(LSAT_BANDS)
-ERA5_SET = set(ERA5_BANDS)
-
-def _clip_invalid_to_nan(cube: np.ndarray, sensor_type: str, band: str) -> np.ndarray:
+def _parse_month_band_indices(descs: List[str]) -> Dict[Tuple[int, str], int]:
     """
-    cube: (12,H,W) numpy array
-    Sets out-of-range values to NaN (float32) BEFORE interpolation/zscore.
+    Return mapping: (month_idx 0..11, band_name_lower) -> band_index_in_stacked
     """
-    st = sensor_type.lower()
-    b = band.lower()
-    cube = cube.astype(np.float32, copy=False)
-
-    invalid = None
-    if st == "sentinel":
-        if b in S1_SET:
-            invalid = (cube < 0.0) | (cube > 2.0)
-        elif b in S2_ALL_BANDS or b in S2_RGBNIR_SET:
-            invalid = (cube < 0.0) | (cube > 10000.0)
-        elif b == "t2m":
-            invalid = (cube < -20.0) | (cube > 60.0)
-        elif b == "tp":
-            invalid = (cube < 0.0)
-
-    elif st == "landsat":
-        if b in LSAT_SET:
-            invalid = (cube < -0.2) | (cube > 1.0)
-        elif b == "t2m":
-            invalid = (cube < -20.0) | (cube > 60.0)
-        elif b == "tp":
-            invalid = (cube < 0.0)
-
-    if invalid is not None and np.any(invalid):
-        cube[invalid] = np.nan
-    return cube
-
-
-# ============================================================
-#  Internals: parse band names
-# ============================================================
-def _parse_month_band_indices(descs: List[str]) -> Tuple[Dict[Tuple[int, str], int], List[str]]:
     mapping: Dict[Tuple[int, str], int] = {}
-    names_seen: List[str] = []
-
     for idx, name in enumerate(descs):
         if name is None:
             continue
-        m = _MONTH_BAND_RE.match(name)
+        m = _MONTH_BAND_RE.match(str(name))
         if not m:
             continue
         month_s, band_name = m.groups()
@@ -166,213 +61,196 @@ def _parse_month_band_indices(descs: List[str]) -> Tuple[Dict[Tuple[int, str], i
             continue
         if not (0 <= month_idx < 12):
             continue
-
         band_name = band_name.lower()
         key = (month_idx, band_name)
         if key in mapping:
-            raise ValueError(f"Duplicate band for month {month_idx + 1}, '{band_name}' in descs.")
+            raise ValueError(f"Duplicate band for month {month_idx+1} '{band_name}' in descriptions.")
         mapping[key] = idx
-        names_seen.append(band_name)
-
-    return mapping, sorted(set(names_seen))
+    return mapping
 
 
-# ============================================================
-#  Main builder (train-matching)
-# ============================================================
 class PrestoTensorBuilder:
     """
-    Builds inference tensors to match training:
-      - structural-only mask
-      - clip invalid -> NaN before interpolation
-      - interpolate along time
-      - fixed zscore normalization
-      - final: nonfinite -> 0 WITHOUT changing mask
-      - keeps self.all_nan_pixels (NIR >=90% missing rule)
+    Builds inference tensors that MATCH your PrestoProcessor behavior:
+
+    - x: (N,12,17)
+    - mask: STRUCTURAL ONLY (constant per pixel)
+    - interpolate NaNs temporally
+    - fixed z-score with (min,max)->(mean,std) conversion
+    - NDVI computed from red/nir when 'ndvi' band is missing
+    - final: replace non-finite with 0 WITHOUT changing mask
     """
 
-    def __init__(
-        self,
-        group_flags: Dict[str, bool] | None = None,
-        batch_size: int = 2048,
-        sensor_type: str = "sentinel",
-    ):
+    def __init__(self, *, batch_size: int = 2048, sensor_type: str = "sentinel"):
         self.batch_size = int(batch_size)
         self.sensor_type = sensor_type.lower()
-        if self.sensor_type not in ["sentinel", "landsat"]:
-            raise ValueError(f"sensor_type must be 'sentinel' or 'landsat', got '{sensor_type}'")
+        if self.sensor_type not in ("sentinel", "landsat"):
+            raise ValueError("sensor_type must be 'sentinel' or 'landsat'")
+        self.shape: list[Optional[int]] = [None, None]
 
-        base = OrderedDict(GROUP_AVAILABLE)
-        if group_flags is not None:
-            for k, v in group_flags.items():
-                if k in base:
-                    base[k] = bool(v)
-        self.group_flags = base
-
-        # channel index -> list of groups that use that channel
-        ch2groups: Dict[int, List[str]] = {}
-        for gname, chs in BANDS_GROUPS_IDX.items():
-            for ch in chs:
-                ch2groups.setdefault(ch, []).append(gname)
-        self.channel_to_groups = ch2groups
-
-        self.shape = [None, None]
-        self.all_nan_pixels: torch.Tensor | None = None
-        self.bad_pixels: torch.Tensor | None = None
-
-    def build_from_tifs(self, paths: Sequence[Path], ref_index: int = 0) -> DataLoader:
-        stacked, lat, lon, desc_lists = align_and_stack_tifs(paths, ref_index=ref_index)
-        C, H, W = stacked.shape
-        N = H * W
-        self.shape = [H, W]
-
-        flat_descs: List[str] = []
-        for dl in desc_lists:
-            flat_descs.extend(dl)
-
-        index_map, _band_names = _parse_month_band_indices(flat_descs)
-
-        x = torch.zeros((N, 12, 17), dtype=torch.float32)
-        mask = torch.zeros_like(x)  # STRUCTURAL ONLY
-        dw = torch.full((N, 12), 9, dtype=torch.long)
-
-        red_cube: np.ndarray | None = None
-        nir_cube: np.ndarray | None = None
-
-        # Fill groups
-        for grp_name, ch_idx_list in BANDS_GROUPS_IDX.items():
-            if grp_name == "NDVI":
-                continue
-
-            enabled = self.group_flags.get(grp_name, GROUP_AVAILABLE.get(grp_name, False))
-            band_list = GROUP_BANDS_ORDER.get(grp_name, [])
-
-            if not enabled:
-                for ch in ch_idx_list:
-                    mask[..., ch] = 1.0
-                continue
-
-            if grp_name == "SRTM":
-                # Not provided in your inference -> structurally mask (match train: SRTM absent)
-                for ch in ch_idx_list:
-                    mask[..., ch] = 1.0
-                continue
-
-            # Strict monthly bands for enabled groups
-            for bi, ch in enumerate(ch_idx_list):
-                if bi >= len(band_list):
-                    break
-                bname = band_list[bi]
-
-                # If missing months -> structural mask (DO NOT raise)
-                if not all((m, bname) in index_map for m in range(12)):
-                    mask[..., ch] = 1.0
-                    continue
-
-                cube = _gather_cube(stacked, index_map, bname)  # (12,H,W)
-                cube = _clip_invalid_to_nan(cube, sensor_type=self.sensor_type, band=bname)
-
-                if bname == "red":
-                    red_cube = cube
-                if bname == "nir":
-                    nir_cube = cube
-
-                x[..., ch] = torch.from_numpy(cube.reshape(12, N).transpose(1, 0))
-
-        # NDVI (ch 16)
-        ndvi_enabled = self.group_flags.get("NDVI", GROUP_AVAILABLE.get("NDVI", True))
-        if ndvi_enabled and (red_cube is not None) and (nir_cube is not None):
-            ndvi = self._compute_ndvi(red_cube, nir_cube)
-            x[..., 16] = torch.from_numpy(ndvi.reshape(12, N).transpose(1, 0))
-        else:
-            mask[..., 16] = 1.0
-
-        # ======================================================
-        # KEEP your NIR ≥90% missing rule (all_nan_pixels)
-        # ======================================================
-        if nir_cube is not None:
-            T = nir_cube.shape[0]  # usually 12
-            nir_valid = np.isfinite(nir_cube)
-            valid_count = nir_valid.sum(axis=0)
-            valid_fraction = valid_count.astype(np.float32) / float(T)
-
-            bad_nir_mask_hw = valid_fraction <= 0.1
-            self.all_nan_pixels = torch.from_numpy(bad_nir_mask_hw.reshape(-1)).bool()
-        else:
-            self.all_nan_pixels = torch.zeros(N, dtype=torch.bool)
-
-        # Structural mask -> zero before interpolation
-        x[mask == 1] = 0.0
-
-        # Interpolate temporally
-        x = interpolate_nan_temporal(x)
-
-        # Fixed z-score scaling (match train)
-        self._zscore_with_fixed_values_inplace(x, mask)
-
-        # Final cleanup: nonfinite -> 0 (DO NOT modify mask)
-        self.bad_pixels = self._final_nonfinite_to_zero_keep_mask(x)
-        # ---- print percent of bad pixels ----
-        n_bad = int(self.bad_pixels.sum().item()) if isinstance(self.bad_pixels, torch.Tensor) else int(np.sum(self.bad_pixels))
-        pct_bad = 100.0 * (n_bad / max(N, 1))
-        print(f"⚠️ bad_pixels: {n_bad:,}/{N:,} ({pct_bad:.2f}%)")
-        
-
-        # lat/lon
-        latlons = torch.from_numpy(
-            np.stack([lat.reshape(-1), lon.reshape(-1)], axis=-1).astype(np.float32)
-        )
-
-        labels = torch.zeros((N,), dtype=torch.long)
-        ds = TensorDataset(x, dw, latlons, mask, labels)
-        return DataLoader(ds, batch_size=self.batch_size, shuffle=False)
+    @staticmethod
+    def _minmax_to_meanstd(minv: float, maxv: float) -> Tuple[float, float]:
+        mean = 0.5 * (minv + maxv)
+        std = 0.5 * (maxv - minv)
+        if std <= 0:
+            std = 1.0
+        return mean, std
 
     @staticmethod
     def _compute_ndvi(red_cube: np.ndarray, nir_cube: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+        """
+        red_cube/nir_cube: (12,H,W) float32 with NaNs allowed
+        returns NDVI: (12,H,W) float32 with NaNs
+        """
         red = red_cube.astype(np.float32, copy=False)
         nir = nir_cube.astype(np.float32, copy=False)
         denom = nir + red
         with np.errstate(invalid="ignore", divide="ignore"):
             ndvi = (nir - red) / (denom + eps)
+        # where denom ~0 => NaN
         ndvi = np.where(np.abs(denom) < eps, np.nan, ndvi)
+        # clamp like typical NDVI
         ndvi = np.clip(ndvi, -1.0, 1.0)
         return ndvi.astype(np.float32, copy=False)
 
-    def _zscore_with_fixed_values_inplace(self, x: torch.Tensor, mask: torch.Tensor) -> None:
-        st = self.sensor_type.lower()
-        params = FIXED_ZSCORE.get(st, None)
-        if params is None:
-            raise ValueError(f"Unknown sensor_type for FIXED_ZSCORE: {st}")
+    def _apply_fixed_zscore(self, x: torch.Tensor, mask: torch.Tensor) -> None:
+        """
+        In-place z-score on active channels ONLY, using PrestoProcessor logic:
+          FIXED_ZSCORE stores (min,max) -> convert to (mean,std)
+        """
+        params = FIXED_ZSCORE[self.sensor_type]
 
-        channel_to_band = {
+        ch_to_var = {
             0: "vv", 1: "vh",
             2: "red", 3: "green", 4: "blue",
-            5: "red_edge1", 6: "red_edge2", 7: "red_edge3",
-            8: "nir", 9: "red_edge4",
+            8: "nir",
             10: "swir1", 11: "swir2",
             12: "t2m", 13: "tp",
+            # 16 is NDVI => DO NOT scale
         }
 
-        for ch, band_name in channel_to_band.items():
-            if band_name not in params:
+        for ch, var in ch_to_var.items():
+            if var not in params:
                 continue
 
-            groups = self.channel_to_groups.get(ch, [])
-            if not any(self.group_flags.get(g, GROUP_AVAILABLE.get(g, False)) for g in groups):
-                continue
-
-            mu, std = params[band_name]
-            std = float(std) if float(std) != 0.0 else 1.0
+            minv, maxv = params[var]
+            mean, std = self._minmax_to_meanstd(float(minv), float(maxv))
 
             valid = (mask[..., ch] == 0)
             if valid.any():
-                x_ch = x[..., ch]
-                x_ch[valid].sub_(float(mu)).div_(std)
+                xch = x[..., ch]
+                xch[valid] = (xch[valid] - mean) / std
 
-    @staticmethod
-    def _final_nonfinite_to_zero_keep_mask(x: torch.Tensor) -> torch.Tensor:
-        N = x.shape[0]
-        bad = (~torch.isfinite(x.view(N, -1))).any(dim=1)
+    def _structural_mask(self, N: int, T: int, device: torch.device) -> torch.Tensor:
+        mask = torch.zeros((N, T, 17), dtype=torch.float32, device=device)
+
+        for ch in _ALWAYS_MASK:
+            mask[:, :, ch] = 1.0
+
+        if self.sensor_type == "sentinel":
+            # sentinel has no SWIR/ERA5 slots
+            for ch in _L8_ONLY:
+                mask[:, :, ch] = 1.0
+        else:
+            # landsat has no S1 slots
+            mask[:, :, 0] = 1.0
+            mask[:, :, 1] = 1.0
+
+        return mask
+
+    def build_from_tifs(self, paths: Sequence[Path], ref_index: int = 0) -> DataLoader:
+        """
+        Returns DataLoader yielding (x, dw, latlons, mask, labels)
+
+        latlons order = (lon, lat)
+        """
+        stacked, lat, lon, desc_lists = align_and_stack_tifs(paths, ref_index=ref_index)
+        C, H, W = stacked.shape
+        N = H * W
+        self.shape = [H, W]
+
+        # flatten all band descriptions across stacked inputs
+        flat_descs: List[str] = []
+        for dl in desc_lists:
+            flat_descs.extend(dl)
+
+        index_map = _parse_month_band_indices(flat_descs)
+
+        # x init NaN (like PrestoProcessor before its final cleanup)
+        x = torch.full((N, 12, 17), float("nan"), dtype=torch.float32)
+        mask = self._structural_mask(N, 12, x.device)
+        dw = torch.full((N, 12), 9, dtype=torch.long)
+
+        # Keep cubes for NDVI computation if needed
+        red_cube: Optional[np.ndarray] = None
+        nir_cube: Optional[np.ndarray] = None
+
+        def has_all_months(band: str) -> bool:
+            b = band.lower()
+            return all((m, b) in index_map for m in range(12))
+
+        def fill_channel_from_band(dst_ch: int, band_name: str) -> Optional[np.ndarray]:
+            """
+            Fill x[:, :, dst_ch] from band_name across all months if available.
+            Returns the (12,H,W) cube if filled, else None.
+            """
+            band = band_name.lower()
+            if not has_all_months(band):
+                return None
+            cube = _gather_cube(stacked, index_map, band).astype(np.float32, copy=False)  # (12,H,W)
+            x[:, :, dst_ch] = torch.from_numpy(cube.reshape(12, N).T)                    # (N,12)
+            return cube
+
+        # -------- Fill channels --------
+        if self.sensor_type == "sentinel":
+            fill_channel_from_band(0, "vv")
+            fill_channel_from_band(1, "vh")
+            red_cube = fill_channel_from_band(2, "red")
+            fill_channel_from_band(3, "green")
+            fill_channel_from_band(4, "blue")
+            nir_cube = fill_channel_from_band(8, "nir")
+
+            # NDVI: use band if exists else compute
+            ndvi_cube = fill_channel_from_band(16, "ndvi")
+            if ndvi_cube is None and (red_cube is not None) and (nir_cube is not None):
+                ndvi_cube = self._compute_ndvi(red_cube, nir_cube)
+                x[:, :, 16] = torch.from_numpy(ndvi_cube.reshape(12, N).T)
+
+        else:
+            # landsat layout uses same RGB+NIR slots + swir/era5 slots
+            red_cube = fill_channel_from_band(2, "red")
+            fill_channel_from_band(3, "green")
+            fill_channel_from_band(4, "blue")
+            nir_cube = fill_channel_from_band(8, "nir")
+            fill_channel_from_band(10, "swir1")
+            fill_channel_from_band(11, "swir2")
+            fill_channel_from_band(12, "t2m")
+            fill_channel_from_band(13, "tp")
+
+            ndvi_cube = fill_channel_from_band(16, "ndvi")
+            if ndvi_cube is None and (red_cube is not None) and (nir_cube is not None):
+                ndvi_cube = self._compute_ndvi(red_cube, nir_cube)
+                x[:, :, 16] = torch.from_numpy(ndvi_cube.reshape(12, N).T)
+
+        # Structural-only masked channels set to 0 before interpolation
+        x[mask == 1] = 0.0
+
+        # Interpolate temporally (fills NaNs in active channels)
+        x = interpolate_nan_temporal(x)
+
+        # Fixed z-score scaling (active channels only)
+        self._apply_fixed_zscore(x, mask)
+
+        # Final cleanup: non-finite -> 0 (do NOT modify mask)
+        bad = ~torch.isfinite(x)
         if bad.any():
-            x[~torch.isfinite(x)] = 0.0
-        return bad
+            x[bad] = 0.0
+
+        # latlons (lon,lat)
+        latlons = torch.from_numpy(
+            np.stack([lon.reshape(-1), lat.reshape(-1)], axis=-1).astype(np.float32)
+        )
+
+        labels = torch.zeros((N,), dtype=torch.long)
+        ds = TensorDataset(x, dw, latlons, mask, labels)
+        return DataLoader(ds, batch_size=self.batch_size, shuffle=False)

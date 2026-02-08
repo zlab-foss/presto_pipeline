@@ -25,95 +25,96 @@ from pyproj import Transformer
 from rasterio.warp import reproject, Resampling
 import torch
 
-def _read_tif(path: Path, as_mask: bool = False) -> Tuple[np.ndarray, float | None, np.ndarray, np.ndarray, List[str]]:
+
+def lonlat_grids_from_transform(transform, src_crs, H: int, W: int):
     """
-    Read GeoTIFF and return:
-      - arr   : (C, H, W) or (H, W) if as_mask=True
-                * FILL_MASK band is dropped if present (by description)
-                * nodata and all non-finite values are set to np.nan
-      - nodata: original nodata value from file (may be None)
-      - lat   : (H, W) latitude grid (EPSG:4326)
-      - lon   : (H, W) longitude grid (EPSG:4326)
-      - descs : list of band descriptions (after dropping FILL_MASK)
+    Robust (H,W) lon/lat grids using affine transform directly (pixel centers).
+    Works regardless of rasterio.transform.xy return shape quirks.
+    """
+    rows = np.arange(H, dtype=np.float64)
+    cols = np.arange(W, dtype=np.float64)
+    cols_grid, rows_grid = np.meshgrid(cols, rows)  # (H,W)
+
+    # pixel center
+    cc = cols_grid + 0.5
+    rr = rows_grid + 0.5
+
+    # Affine: x = a*col + b*row + c ; y = d*col + e*row + f
+    a, b, c, d, e, f = transform.a, transform.b, transform.c, transform.d, transform.e, transform.f
+    xs = a * cc + b * rr + c
+    ys = d * cc + e * rr + f
+
+    transformer = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+    lon, lat = transformer.transform(xs, ys)
+
+    lon = np.asarray(lon, dtype=np.float64)
+    lat = np.asarray(lat, dtype=np.float64)
+    return lon, lat
+
+
+
+
+def _read_tif(
+    path: Path,
+    as_mask: bool = False,
+) -> Tuple[np.ndarray, float | None, np.ndarray, np.ndarray, List[str]]:
+    """
+    Returns:
+      arr   : (C,H,W) or (H,W) if as_mask=True
+      nodata: src.nodata
+      lon   : (H,W) EPSG:4326
+      lat   : (H,W) EPSG:4326
+      descs : list of band descriptions (after dropping FILL_MASK)
     """
     path = Path(path)
 
     with rasterio.open(path) as src:
-        # read data
-        arr = src.read(1) if as_mask else src.read()   # (H, W) or (C, H, W)
+        arr = src.read(1) if as_mask else src.read()
         nodata = src.nodata
         transform = src.transform
         src_crs = src.crs
-
-        if src_crs is None:
-            raise ValueError(f"{path} has no CRS; cannot compute lat/lon.")
-
         H, W = src.height, src.width
 
-        # band descriptions (may be None)
-        if src.descriptions is not None:
-            descs = list(src.descriptions)
-        else:
-            if arr.ndim == 2:
-                descs = [None]
-            else:
-                descs = [None] * arr.shape[0]
+        if src_crs is None:
+            raise ValueError(f"{path} has no CRS; cannot compute lon/lat.")
 
-        # ----------------------------
-        # Drop FILL_MASK band if present
-        # ----------------------------
-        if not as_mask and arr.ndim == 3:
-            keep_idx = []
+        # descriptions
+        descs = list(src.descriptions) if src.descriptions is not None else (
+            [None] if arr.ndim == 2 else [None] * arr.shape[0]
+        )
+
+        # drop FILL_MASK only for non-mask multi-band rasters
+        if (not as_mask) and (arr.ndim == 3):
+            keep = []
             for i, d in enumerate(descs):
                 if d is None:
-                    keep_idx.append(i)
+                    keep.append(i)
                 else:
-                    name = d.strip().upper()
-                    if name != "FILL_MASK":
-                        keep_idx.append(i)
+                    if d.strip().upper() != "FILL_MASK":
+                        keep.append(i)
+            if len(keep) < arr.shape[0]:
+                arr = arr[keep, ...]
+                descs = [descs[i] for i in keep]
 
-            if len(keep_idx) < arr.shape[0]:
-                arr = arr[keep_idx, ...]
-                descs = [descs[i] for i in keep_idx]
+        # float + cleanup
+        arr = arr.astype(np.float32, copy=False)
 
-        # ensure float for cleaning
-        arr = arr.astype("float32", copy=False)
-
-        # ----------------------------
-        # Replace nodata with NaN
-        # ----------------------------
+        # nodata -> NaN
         if nodata is not None:
-            if arr.ndim == 2:
-                arr[arr == nodata] = np.nan
-            else:
-                arr[arr == nodata] = np.nan
+            arr[arr == nodata] = np.nan
 
-        # ----------------------------
-        # Replace non-finite (inf, -inf, NaN, etc.) with NaN
-        # ----------------------------
+        # nonfinite -> NaN
         bad = ~np.isfinite(arr)
         if bad.any():
             arr[bad] = np.nan
 
-        # ----------------------------
-        # Build lat / lon grids from transform
-        # ----------------------------
-        rows = np.arange(H)
-        cols = np.arange(W)
-        cols_grid, rows_grid = np.meshgrid(cols, rows)
+        # robust lon/lat grids
+        lon, lat = lonlat_grids_from_transform(transform, src_crs, H, W)
 
-        xs, ys = rasterio.transform.xy(transform, rows_grid, cols_grid, offset="center")
-        xs = np.asarray(xs)
-        ys = np.asarray(ys)
-
-        transformer = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
-        lon, lat = transformer.transform(xs, ys)
-
-    # If as_mask=True, arr is (H, W), descs should be length 1
     if as_mask and arr.ndim == 2 and len(descs) > 1:
         descs = [descs[0]]
 
-    return arr, nodata, lat, lon, descs
+    return arr, nodata, lon, lat, descs
 
 
 
@@ -123,36 +124,15 @@ def align_and_stack_tifs(
     resampling: Resampling = Resampling.nearest,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[List[str]]]:
     """
-    Align and merge multiple GeoTIFFs to the same grid.
-
-    Parameters
-    ----------
-    paths : sequence of Path
-        List of GeoTIFF paths.
-    ref_index : int
-        Index of the file in `paths` to use as the reference grid (CRS, transform, H, W).
-    resampling : rasterio.warp.Resampling
-        Resampling method for reprojection.
-
-    Returns
-    -------
-    stacked : np.ndarray
-        (C_total, H, W) array, all inputs stacked along channels,
-        with nodata and non-finite values set to np.nan and without FILL_MASK.
-    lat : np.ndarray
-        (H, W) latitude grid (EPSG:4326) for the reference grid.
-    lon : np.ndarray
-        (H, W) longitude grid (EPSG:4326) for the reference grid.
-    band_desc_lists : list[list[str]]
-        Per-file list of band descriptions AFTER dropping FILL_MASK.
-        (i.e., band_desc_lists[i] corresponds to paths[i]).
+    Returns:
+      stacked : (C_total,H,W) float32 with NaNs
+      lon     : (H,W) EPSG:4326
+      lat     : (H,W) EPSG:4326
+      band_desc_lists : per-file band descriptions after dropping FILL_MASK
     """
-    if len(paths) == 0:
+    if not paths:
         raise ValueError("No paths provided to align_and_stack_tifs().")
 
-    # -----------------------------
-    # Open reference file
-    # -----------------------------
     ref_path = Path(paths[ref_index])
     with rasterio.open(ref_path) as ref:
         ref_crs = ref.crs
@@ -160,58 +140,45 @@ def align_and_stack_tifs(
         ref_height = ref.height
         ref_width = ref.width
 
-    # Build lat/lon grid for the reference
-    rows = np.arange(ref_height)
-    cols = np.arange(ref_width)
-    cols_grid, rows_grid = np.meshgrid(cols, rows)
+    if ref_crs is None:
+        raise ValueError(f"Reference tif has no CRS: {ref_path}")
 
-    xs, ys = rasterio.transform.xy(ref_transform, rows_grid, cols_grid, offset="center")
-    xs = np.asarray(xs)
-    ys = np.asarray(ys)
+    lon, lat = lonlat_grids_from_transform(ref_transform, ref_crs, ref_height, ref_width)
 
-    transformer = Transformer.from_crs(ref_crs, "EPSG:4326", always_xy=True)
-    lon, lat = transformer.transform(xs, ys)
-
-    # -----------------------------
-    # Reproject each raster to reference grid
-    # -----------------------------
     aligned_arrays: List[np.ndarray] = []
     band_desc_lists: List[List[str]] = []
 
     for p in paths:
         p = Path(p)
         with rasterio.open(p) as src:
-            data = src.read()  # (C, H, W) or (1, H, W)
+            data = src.read()  # (C,H,W)
             src_transform = src.transform
             src_crs = src.crs
             nodata = src.nodata
-            if src.descriptions is not None:
-                descs = list(src.descriptions)
-            else:
-                descs = [None] * data.shape[0]
+            descs = list(src.descriptions) if src.descriptions is not None else [None] * data.shape[0]
 
-        # Drop FILL_MASK band if present
-        keep_idx = []
+        if src_crs is None:
+            raise ValueError(f"Source tif has no CRS: {p}")
+
+        # drop FILL_MASK
+        keep = []
         for i, d in enumerate(descs):
             if d is None:
-                keep_idx.append(i)
+                keep.append(i)
             else:
-                name = d.strip().upper()
-                if name != "FILL_MASK":
-                    keep_idx.append(i)
+                if d.strip().upper() != "FILL_MASK":
+                    keep.append(i)
 
-        if len(keep_idx) < data.shape[0]:
-            data = data[keep_idx, ...]
-            descs = [descs[i] for i in keep_idx]
+        if len(keep) < data.shape[0]:
+            data = data[keep, ...]
+            descs = [descs[i] for i in keep]
 
-        # Prepare destination array on reference grid
         C = data.shape[0]
-        dst = np.full((C, ref_height, ref_width), np.nan, dtype="float32")
+        dst = np.full((C, ref_height, ref_width), np.nan, dtype=np.float32)
 
-        # Reproject each band
         for b in range(C):
             reproject(
-                source=data[b].astype("float32"),
+                source=data[b].astype(np.float32, copy=False),
                 destination=dst[b],
                 src_transform=src_transform,
                 src_crs=src_crs,
@@ -222,7 +189,6 @@ def align_and_stack_tifs(
                 dst_nodata=np.nan,
             )
 
-        # Clean non-finite values
         bad = ~np.isfinite(dst)
         if bad.any():
             dst[bad] = np.nan
@@ -230,12 +196,10 @@ def align_and_stack_tifs(
         aligned_arrays.append(dst)
         band_desc_lists.append(descs)
 
-    # -----------------------------
-    # Stack all channels together
-    # -----------------------------
-    stacked = np.concatenate(aligned_arrays, axis=0)  # (C_total, H, W)
+    stacked = np.concatenate(aligned_arrays, axis=0)
+    return stacked, lon, lat, band_desc_lists
 
-    return stacked, lat, lon, band_desc_lists
+
 
 
 

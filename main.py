@@ -150,47 +150,6 @@ def get_tile_statistics(tiler: ShapefileTiler) -> Dict:
         return {"num_polygons": 0, "tiles": []}
 
 
-def create_presto_builder(sensor_type: str) -> PrestoTensorBuilder:
-    """Create PrestoTensorBuilder with appropriate band configuration."""
-    try:
-        sensor_type = sensor_type.lower()
-
-        if sensor_type == "sentinel":
-            builder = PrestoTensorBuilder(
-                group_flags={
-                    "S1": True,
-                    "S2_RGB": True,
-                    "S2_Red_Edge": False,
-                    "S2_NIR_10m": True,
-                    "S2_NIR_20m": False,
-                    "S2_SWIR": False,
-                    "ERA5": False,
-                    "SRTM": False,
-                    "NDVI": True,
-                },
-                sensor_type="sentinel",
-            )
-        else:  # landsat
-            builder = PrestoTensorBuilder(
-                group_flags={
-                    "S1": False,
-                    "S2_RGB": True,
-                    "S2_Red_Edge": False,
-                    "S2_NIR_10m": True,
-                    "S2_NIR_20m": False,
-                    "S2_SWIR": True,
-                    "ERA5": True,
-                    "SRTM": False,
-                    "NDVI": True,
-                },
-                sensor_type="landsat",
-            )
-
-        print(f"✅ Created PrestoTensorBuilder for {sensor_type}")
-        return builder
-
-    except Exception as e:
-        raise RuntimeError(f"Failed to create PrestoTensorBuilder: {e}")
 
 
 def load_model(configs: Dict) -> PrestoClassifier:
@@ -204,11 +163,11 @@ def load_model(configs: Dict) -> PrestoClassifier:
         if sensor_type == "sentinel":
             sentinel_bands = configs.get("sentinel_bands", ["red", "green", "blue", "nir"])
             if set(sentinel_bands) == {"red", "green", "blue", "nir"}:
-                model_path = "./weights/irrigation/Presto_S2RGBNIR_S1.pth"
+                model_path = "./weights/irrigation/Presto_S2RGBNIR_S1.pt"
             else:
-                model_path = "./weights/irrigation/Presto_S2Full_S1.pth"
+                model_path = "./weights/irrigation/Presto_S2Full_S1.pt"
         else:
-            model_path = "./weights/irrigation/Presto_L8_ERA5.pth"
+            model_path = "./weights/irrigation/Presto_L8_ERA5.pt"
 
         clf = PrestoClassifier.load(model_path, device=device)
         print(f"✅ Loaded model from: {model_path}")
@@ -580,11 +539,16 @@ def run_pipeline(configs: Dict) -> None:
     try:
         print("🔍 Validating configuration...")
         validate_config(configs)
-
         out_root = Path(configs["out_dir"])
         setup_directories(out_root)
 
-        dl_optical, dl_aux = initialize_downloaders(configs, out_root)
+        try:
+            dl_optical, dl_aux = initialize_downloaders(configs, out_root)
+        except Exception as e:
+            print("⚠️  VPN not connected – downloaders disabled")
+            dl_optical, dl_aux = None, None
+
+        
         tiler = initialize_tiler(configs)
 
         tile_stats = get_tile_statistics(tiler)
@@ -599,8 +563,11 @@ def run_pipeline(configs: Dict) -> None:
                     f"   • Polygon {t['poly_idx']}: {t['nx']}×{t['ny']} = "
                     f"{t['total']} tiles ({t['width_m']/1000:.1f}×{t['height_m']/1000:.1f} km)"
                 )
-
-        builder = create_presto_builder(configs["sensor_type"].lower())
+        
+        builder = PrestoTensorBuilder(
+            sensor_type=configs["sensor_type"].lower(),
+        )
+      
         clf = load_model(configs)
 
         print("\n📊 Counting total tiles...")
@@ -649,18 +616,18 @@ def run_pipeline(configs: Dict) -> None:
 # =============================================================================
 if __name__ == "__main__":
     configs = {
-        "asset_path": "./ROI/test/patches_season_99_400.shp",
+        "asset_path": "./ROI/test/patches_season_97_98.shp",
         "credentials_path": "./credentials/earthengine_credentials.json",
         "service_account": "fanapanomaly@fanapanomaly.iam.gserviceaccount.com",
-        "year": 2020,
-        "sensor_type": "sentinel",  # "sentinel" or "landsat"
+        "year": 2018,
+        "sensor_type": "landsat",  # "sentinel" or "landsat"
         "sentinel_bands": ["red", "green", "blue", "nir"],
-        "out_dir": "./data/test_results/v2",
+        "out_dir": "./data/test_results/2018/landsat",
         "tile_size": 2024,
         "landuse_method": "ESRI",  # "ESRI", "presto", or "skip"
         "device": "cuda",  # "cuda" or "cpu"
         "tile_idx_resume": -1,
-        "skip_download": False,  # if True: skip any download when the expected tif already exists
+        "skip_download": True,  # if True: skip any download when the expected tif already exists
     }
 
     try:
@@ -669,4 +636,3 @@ if __name__ == "__main__":
         print("\n\n⚠️  Pipeline interrupted by user")
     except Exception as e:
         print(f"\n\n❌ Fatal error: {e}")
-        exit(1)
