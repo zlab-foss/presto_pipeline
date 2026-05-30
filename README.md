@@ -7,4 +7,18 @@ python get_data.py   --shp ./ROI/test-lulc.shp   --year 2023   --source s2   --s
 python get_data.py   --shp ./ROI/test-presto-crop.shp   --year 2019   --source landsat
 python get_data.py   --shp ./ROI/test-presto-crop.shp   --year 2021   --source worldcover   --worldcover-scale 10
 
+
+
+
+python get_data.py --shp ./ROI/lulc/train-lulc.shp --year 2021 --source worldcover --worldcover-scale 30 --start-after-poly-idx 6298
+
+
+proxychains python get_data.py --shp ./ROI/lulc/val-lulc.shp --year 2021 --source worldcover --worldcover-scale 30
+```
+
+
+
+### Docker
+```
+
 ```

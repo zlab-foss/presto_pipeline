@@ -195,6 +195,7 @@ def run_tiled_download(
     max_pixels: int = 1024,
     s2_bands: Union[str, List[str]] = "all",
     worldcover_scale: int = 10,
+    start_after_poly_idx: int = -1,
 ) -> None:
     _ensure_shp_exists(shp_path)
     
@@ -223,7 +224,8 @@ def run_tiled_download(
         temp_dir=str(temp_dir),
     )
 
-    total = ok = fail = 0
+    total = ok = fail = skipped = 0
+    started_processing = start_after_poly_idx < 0
     failed_rois: set[int] = set()
     failed_tiles_by_roi: Dict[int, List[str]] = {}
 
@@ -238,12 +240,26 @@ def run_tiled_download(
         print(f"S2 bands    : {s2_bands}")
     if source == "worldcover":
         print(f"WorldCover scale : {worldcover_scale}")
+    print(f"Start after poly_idx : {start_after_poly_idx}")
 
     for i, item in enumerate(tiler, 1):
         total += 1
         tile_shp = item["shp_path"]
 
         poly_idx, tile_tag = _normalize_tile_id(item, fallback_i=i)
+
+        if not started_processing:
+            if poly_idx > start_after_poly_idx:
+                started_processing = True
+                print(
+                    f"\nResume point reached: poly_idx {poly_idx} > {start_after_poly_idx}. Starting downloads."
+                )
+            else:
+                skipped += 1
+                print(
+                    f"\nSkipping tile: poly_idx {poly_idx} is not greater than {start_after_poly_idx}"
+                )
+                continue
 
 
         print("\nProcessing tile:")
@@ -277,6 +293,7 @@ def run_tiled_download(
     print(f"Total tiles : {total}")
     print(f"Success     : {ok}")
     print(f"Failed      : {fail}")
+    print(f"Skipped     : {skipped}")
     if failed_rois:
         failed_sorted = sorted(failed_rois)
         print(f"Failed ROI poly_idx values ({len(failed_sorted)}): {failed_sorted}")
@@ -315,14 +332,18 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="ESA WorldCover export resolution (meters per pixel). Only used when --source worldcover.",
     )
+    p.add_argument(
+        "--start-after-poly-idx",
+        type=int,
+        default=-1,
+        help="Only process tiles with poly_idx greater than this value.",
+    )
 
 
     return p.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    
-
 
     run_tiled_download(
         shp_path=Path(args.shp),
@@ -333,4 +354,5 @@ if __name__ == "__main__":
         max_pixels=args.max_pixels,
         s2_bands=args.s2_bands,
         worldcover_scale=args.worldcover_scale,
+        start_after_poly_idx=args.start_after_poly_idx,
     )
