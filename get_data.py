@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any, List, Union
 
+import rasterio
+
 
 # ---------------------------------------------------------------------
 # Your project imports (adjust module paths if needed)
@@ -41,6 +43,18 @@ DEFAULT_CONFIGS = {
 # =========================
 # Helpers
 # =========================
+def _is_valid_tif(path: Path) -> bool:
+    """Return True if path exists, is non-empty, and rasterio can open it."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        with rasterio.open(path) as ds:
+            _ = ds.profile
+        return True
+    except Exception:
+        return False
+
+
 def _ensure_shp_exists(shp_path: Path) -> None:
     if not shp_path.exists():
         raise FileNotFoundError(f"Shapefile not found: {shp_path}")
@@ -269,6 +283,13 @@ def run_tiled_download(
         print(f"  CRS          : {item.get('crs')}")
 
         out_name = _mk_out_name(source=source, year=year, poly_idx=poly_idx, tile_tag=tile_tag)
+        out_path = out_dir / out_name
+
+        if _is_valid_tif(out_path):
+            ok += 1
+            skipped += 1
+            print(f"  ⏭ Already downloaded and valid, skipping: {out_name}")
+            continue
 
         t0 = time.time()
         try:
