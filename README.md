@@ -8,7 +8,6 @@ Tile a shapefile of ROIs and download Earth observation data per tile from Googl
 pip install -r requirements.txt
 ```
 
-<<<<<<< HEAD
 
 
 
@@ -24,7 +23,6 @@ proxychains python get_data.py --shp ./ROI/lulc/val-lulc.shp --year 2021 --sourc
 ```
 
 ```
-=======
 Place a GEE service-account key at `./ee-rsai-service-account.json` (or update `DEFAULT_CONFIGS` in [get_data.py](get_data.py)).
 
 ## Usage
@@ -67,4 +65,3 @@ Helper scripts in [utils/](utils/):
 - [wcDistribution.js](utils/wcDistribution.js) — GEE Code Editor script to compute WorldCover class percentages per tile (upload a grid shapefile and run)
 - [wcFiltering.py](utils/wcFiltering.py) — filter a GeoJSON grid (with WorldCover percentages) by class thresholds
 - [groupRegion.py](utils/groupRegion.py), [move.py](utils/move.py) — file/region organization helpers
->>>>>>> 545d3e7de0fafca642cf216edc0c6168e2662cf8
