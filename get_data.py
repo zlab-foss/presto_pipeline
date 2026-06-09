@@ -194,6 +194,7 @@ def run_tiled_download(
     temp_dir: Path,
     max_pixels: int = 1024,
     s2_bands: Union[str, List[str]] = "all",
+    limit: Optional[int] = None,
 ) -> None:
     _ensure_shp_exists(shp_path)
     
@@ -227,10 +228,18 @@ def run_tiled_download(
     print(f"Out dir     : {out_dir}")
     print(f"Temp tiles  : {temp_dir}")
     print(f"Max pixels  : {max_pixels}")
+    if limit is not None:
+        print(f"Poly limit  : {limit}")
     if source == "s2":
         print(f"S2 bands    : {s2_bands}")
 
+    seen_polys: set[int] = set()
+
     for i, item in enumerate(tiler, 1):
+        poly_idx_raw = _safe_int(item.get("poly_idx"), default=i)
+        if limit is not None and len(seen_polys) >= limit and poly_idx_raw not in seen_polys:
+            break
+        seen_polys.add(poly_idx_raw)
         total += 1
         tile_shp = item["shp_path"]
 
@@ -294,11 +303,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--temp", default="./tmp_tiles", type=str, help="Temp directory for tiled shapefiles")
     p.add_argument("--max_pixels", default=1024, type=int, help="Max pixels for tiler")
     p.add_argument(
-    "--s2-bands",
-    nargs="+",
-    default=["all"],
-    help="Sentinel-2 bands (e.g. red green blue nir) or 'all'",
-)
+        "--s2-bands",
+        nargs="+",
+        default=["all"],
+        help="Sentinel-2 bands (e.g. red green blue nir) or 'all'",
+    )
+    p.add_argument(
+        "--limit",
+        default=None,
+        type=int,
+        help="Max number of polygons to download (default: all)",
+    )
 
     return p.parse_args()
 
@@ -315,4 +330,5 @@ if __name__ == "__main__":
         temp_dir=Path(args.temp),
         max_pixels=args.max_pixels,
         s2_bands=args.s2_bands,
+        limit=args.limit,
     )

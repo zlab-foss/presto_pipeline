@@ -47,6 +47,7 @@ python get_data.py --shp <shapefile> --year <year> --source <source> [options]
 | `--temp` | `./tmp_tiles` | Directory for temporary per-tile shapefiles |
 | `--max_pixels` | `1024` | Max tile size in pixels (used to split large ROIs) |
 | `--s2-bands` | `all` | Sentinel-2 bands to download, e.g. `red green blue nir` |
+| `--limit` | _(all)_ | Max number of polygons to download (useful for testing) |
 
 ### Examples
 
@@ -65,6 +66,9 @@ python get_data.py --shp ./ROI/jask.shp --year 2023 --source era5
 
 # SRTM elevation (year is required by CLI but ignored for SRTM)
 python get_data.py --shp ./ROI/tehran.shp --year 2024 --source srtm
+
+# Download only the first 3 polygons (useful for quick testing)
+python get_data.py --shp ./ROI/tehran.shp --year 2024 --source s2 --limit 3
 ```
 
 ## Output structure
