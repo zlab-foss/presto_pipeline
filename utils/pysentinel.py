@@ -42,7 +42,7 @@ class S2GEEDownloader:
             credentials_path="path/to/key.json",
             service_account="xxx@yyy.iam.gserviceaccount.com",
             output_dir="./data/gee_inputs",
-            bands=["red", "green", "blue", "nir"],  # or "all"
+            bands=["B2", "B3", "B4", "B8"],  # or "all"
             s2_cloudy_pct=10,
             export_scale=10,
             start_month=9,
@@ -56,16 +56,9 @@ class S2GEEDownloader:
         )
     """
 
-    # All available S2 bands & their friendly names
     _FULL_S2_BANDS = [
-        "B1", "B2", "B3", "B4", "B5", "B6",
-        "B7", "B8", "B8A", "B9", "B11", "B12",
-    ]
-    _FULL_S2_NAMES = [
-        "coastal", "blue", "green", "red",
-        "red_edge1", "red_edge2", "red_edge3",
-        "nir", "red_edge4", "water_vapor",
-        "swir1", "swir2",
+        "B2", "B3", "B4", "B5", "B6",
+        "B7", "B8", "B8A", "B11", "B12",
     ]
 
     def __init__(
@@ -73,7 +66,7 @@ class S2GEEDownloader:
         credentials_path: str,
         service_account: str,
         output_dir: str,
-        bands: Union[str, List[str]] = ("red", "green", "blue", "nir"),
+        bands: Union[str, List[str]] = ("B2", "B3", "B4", "B8"),
         s2_cloudy_pct: int = 10,
         export_scale: int = 10,
         start_month: int = 9,
@@ -100,39 +93,23 @@ class S2GEEDownloader:
         # ------------------------------------------------------------------
         #  BAND SELECTION
         # ------------------------------------------------------------------
-        # Map from friendly name -> (band_code, index)
-        name_to_band = {
-            name: (code, idx)
-            for idx, (code, name) in enumerate(
-                zip(self._FULL_S2_BANDS, self._FULL_S2_NAMES)
-            )
-        }
-
         if isinstance(bands, str) and bands.lower() == "all":
-            # Use all bands
-            selected_names = self._FULL_S2_NAMES
+            self.S2_BANDS = list(self._FULL_S2_BANDS)
         else:
-            # Use user-specified subset
             if isinstance(bands, str):
                 raise ValueError(
                     "If 'bands' is a string, it must be 'all'. "
-                    "Otherwise provide a list, e.g. ['red', 'nir']."
+                    "Otherwise provide a list, e.g. ['B2', 'B8']."
                 )
-            # Validate names
-            invalid = [b for b in bands if b not in name_to_band]
+            invalid = [b for b in bands if b not in self._FULL_S2_BANDS]
             if invalid:
                 raise ValueError(
-                    f"Invalid band names: {invalid}. "
-                    f"Valid names: {list(name_to_band.keys())}"
+                    f"Invalid band codes: {invalid}. "
+                    f"Valid codes: {self._FULL_S2_BANDS}"
                 )
-            selected_names = list(bands)
+            self.S2_BANDS = list(bands)
 
-        # Keep order of _FULL_S2_NAMES but only selected
-        sel_indices = [self._FULL_S2_NAMES.index(n) for n in selected_names]
-        self.S2_NAMES = [self._FULL_S2_NAMES[i] for i in sel_indices]
-        self.S2_BANDS = [self._FULL_S2_BANDS[i] for i in sel_indices]
-
-        print(f"✅ S2 bands selected: {self.S2_NAMES}")
+        print(f"✅ S2 bands selected: {self.S2_BANDS}")
 
     # ----------------------------------------------------------------------
     #  INTERNAL HELPERS
@@ -268,13 +245,13 @@ class S2GEEDownloader:
             .filterDate(start, end)
             .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", self.s2_cloudy_pct))
             .map(_mask)
-            .select(self.S2_BANDS, self.S2_NAMES)
+            .select(self.S2_BANDS)
         )
 
         # Fallback image if no scenes
         fallback = (
-            ee.Image.constant([0] * len(self.S2_NAMES))
-            .rename(self.S2_NAMES)
+            ee.Image.constant([0] * len(self.S2_BANDS))
+            .rename(self.S2_BANDS)
             .selfMask()
             .toFloat()
             .clip(roi)
@@ -297,7 +274,7 @@ class S2GEEDownloader:
         """
         def per_month(m):
             s2 = self._s2_month(roi, season_year, m)
-            return s2.rename(self._rename_with_month(self.S2_NAMES, m))
+            return s2.rename(self._rename_with_month(self.S2_BANDS, m))
 
         images = ee.List.sequence(1, 12).map(per_month)
         stack = ee.ImageCollection.fromImages(images).toBands()
