@@ -301,7 +301,7 @@ class S1GEEDownloader:
 
     - Uses COPERNICUS/S1_GRD
     - Filters IW mode, 10 m, dual-pol VV/VH
-    - Converts dB → linear before taking monthly median
+    - Monthly median computed in dB scale (no linear conversion)
     - Outputs 24 bands: M01_VV, M01_VH, ..., M12_VV, M12_VH
 
     Usage:
@@ -417,17 +417,9 @@ class S1GEEDownloader:
     # ------------------------------------------------------------------
     #  S1 HELPERS
     # ------------------------------------------------------------------
-    def _db_to_linear(self, img_db: ee.Image) -> ee.Image:
-        """
-        Convert VV/VH from dB to linear power.
-        """
-        vv_lin = ee.Image(10).pow(img_db.select("VV").divide(10.0))
-        vh_lin = ee.Image(10).pow(img_db.select("VH").divide(10.0))
-        return vv_lin.addBands(vh_lin).rename(self.S1_NAMES)
-
     def _s1_month(self, roi, season_year, m_idx) -> ee.Image:
         """
-        Build monthly composite for Sentinel-1 VV/VH in linear scale.
+        Build monthly composite for Sentinel-1 VV/VH in dB scale.
         """
         start = self._bin_start(season_year, m_idx)
         end = self._bin_end(season_year, m_idx)
@@ -447,10 +439,6 @@ class S1GEEDownloader:
         if self.orbit_pass is not None:
             col_db = col_db.filter(ee.Filter.eq("orbitProperties_pass", self.orbit_pass))
 
-        # Convert each image from dB to linear
-        # col_lin = col_db.map(self._db_to_linear)
-        col_lin = col_db
-
         # Fallback image if no scenes
         fallback = (
             ee.Image.constant([0, 0])
@@ -462,8 +450,8 @@ class S1GEEDownloader:
 
         return ee.Image(
             ee.Algorithms.If(
-                col_lin.size().gt(0),
-                col_lin.median()
+                col_db.size().gt(0),
+                col_db.median()
                 .select(self.S1_NAMES, self.S1_NAMES)
                 .toFloat()
                 .clip(roi),
@@ -476,7 +464,7 @@ class S1GEEDownloader:
     # ------------------------------------------------------------------
     def create_stack(self, roi, season_year: int) -> ee.Image:
         """
-        Create 12-month S1 VV/VH median stack (linear scale) for given ROI and season year.
+        Create 12-month S1 VV/VH median stack (dB scale) for given ROI and season year.
         """
 
         def per_month(m):
