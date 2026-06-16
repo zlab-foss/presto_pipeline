@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any, List, Union
 
+import rasterio
+
 # ---------------------------------------------------------------------
 # Your project imports (adjust module paths if needed)
 # ---------------------------------------------------------------------
@@ -42,6 +44,17 @@ DEFAULT_CONFIGS = {
 # =========================
 # Helpers
 # =========================
+def _is_valid_tif(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        with rasterio.open(path) as ds:
+            _ = ds.profile
+        return True
+    except Exception:
+        return False
+
+
 def _ensure_shp_exists(shp_path: Path) -> None:
     if not shp_path.exists():
         raise FileNotFoundError(f"Shapefile not found: {shp_path}")
@@ -195,6 +208,7 @@ def run_tiled_download(
     max_pixels: int = 1024,
     s2_bands: Union[str, List[str]] = "all",
     limit: Optional[int] = None,
+    start_after_poly_idx: int = -1,
 ) -> None:
     _ensure_shp_exists(shp_path)
     
@@ -217,7 +231,8 @@ def run_tiled_download(
         temp_dir=str(temp_dir),
     )
 
-    total = ok = fail = 0
+    total = ok = fail = skipped = 0
+    started_processing = start_after_poly_idx < 0
     failed_rois: set[int] = set()
     failed_tiles_by_roi: Dict[int, List[str]] = {}
 
@@ -230,6 +245,8 @@ def run_tiled_download(
     print(f"Max pixels  : {max_pixels}")
     if limit is not None:
         print(f"Poly limit  : {limit}")
+    if start_after_poly_idx >= 0:
+        print(f"Start after poly_idx : {start_after_poly_idx}")
     if source == "s2":
         print(f"S2 bands    : {s2_bands}")
 
@@ -245,6 +262,13 @@ def run_tiled_download(
 
         poly_idx, tile_tag = _normalize_tile_id(item, fallback_i=i)
 
+        if not started_processing:
+            if poly_idx > start_after_poly_idx:
+                started_processing = True
+                print(f"\nResume point reached: poly_idx {poly_idx} > {start_after_poly_idx}. Starting downloads.")
+            else:
+                skipped += 1
+                continue
 
         print("\nProcessing tile:")
         print(f"  Tile shp     : {tile_shp}")
@@ -253,6 +277,13 @@ def run_tiled_download(
         print(f"  CRS          : {item.get('crs')}")
 
         out_name = _mk_out_name(source=source, year=year, poly_idx=poly_idx, tile_tag=tile_tag)
+        out_path = out_dir / out_name
+
+        if _is_valid_tif(out_path):
+            ok += 1
+            skipped += 1
+            print(f"  Already downloaded and valid, skipping: {out_name}")
+            continue
 
         t0 = time.time()
         try:
@@ -277,6 +308,7 @@ def run_tiled_download(
     print(f"Total tiles : {total}")
     print(f"Success     : {ok}")
     print(f"Failed      : {fail}")
+    print(f"Skipped     : {skipped}")
     if failed_rois:
         failed_sorted = sorted(failed_rois)
         print(f"Failed ROI poly_idx values ({len(failed_sorted)}): {failed_sorted}")
@@ -314,6 +346,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Max number of polygons to download (default: all)",
     )
+    p.add_argument(
+        "--start-after-poly-idx",
+        type=int,
+        default=-1,
+        help="Only process tiles with poly_idx greater than this value (for resuming).",
+    )
 
     return p.parse_args()
 
@@ -331,4 +369,5 @@ if __name__ == "__main__":
         max_pixels=args.max_pixels,
         s2_bands=args.s2_bands,
         limit=args.limit,
+        start_after_poly_idx=args.start_after_poly_idx,
     )
