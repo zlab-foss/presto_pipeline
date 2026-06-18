@@ -1,0 +1,28 @@
+workers: 4              # workers per (crop, source) group
+year: 2019
+sources: [s1, s2]       # each crop runs once per source, all in parallel
+log_dir: ./logs_parallel
+
+crops:
+  - name: barley
+    shp:  ./ROI/barley/shapefile-province-cc-shuffled.shp
+    out:  ./data/barley
+    temp: ./tmp_tiles_barley
+
+  - name: wheat
+    shp:  ./ROI/wheat/shapefile-province-cc-shuffled.shp
+    out:  ./data/wheat
+    temp: ./tmp_tiles_wheat
+
+  - name: rice
+    shp:  ./ROI/rice/shapefile-province-cc-shuffled.shp
+    out:  ./data/rice
+    temp: ./tmp_tiles_rice
+
+  # Per-crop overrides:
+  # - name: corn
+  #   shp:  ./ROI/corn/shapefile-province-cc-shuffled.shp
+  #   out:  ./data/corn
+  #   temp: ./tmp_tiles_corn
+  #   sources: [s2]      # only s2 for this crop
+  #   workers: 2
