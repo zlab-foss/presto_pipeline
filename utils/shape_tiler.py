@@ -64,6 +64,8 @@ class ShapefileTiler:
         shp_path: str | Path,
         max_pixels: int = 2500,
         temp_dir: str | Path | None = None,
+        start_after_poly_idx: int = -1,
+        limit: int | None = None,
     ):
         """
         Parameters
@@ -77,6 +79,14 @@ class ShapefileTiler:
         temp_dir : str or Path or None
             Directory where temporary shapefiles will be written.
             If None, a new temporary directory will be created.
+        start_after_poly_idx : int
+            Only iterate (and write temp shapefiles for) polygons whose
+            poly_idx is strictly greater than this value. Polygons at or
+            below it are skipped *before* any file is written. This keeps
+            parallel workers, which share one temp_dir, from writing the
+            same temp shapefile path concurrently.
+        limit : int or None
+            Maximum number of polygons to iterate over. None means no limit.
         """
         self.shp_path = Path(shp_path)
         if not self.shp_path.exists():
@@ -85,6 +95,8 @@ class ShapefileTiler:
         self.pixel_size = float(10)
         self.max_pixels = int(max_pixels)
         self.max_size_m = self.pixel_size * self.max_pixels  # e.g. 25000 m
+        self.start_after_poly_idx = int(start_after_poly_idx)
+        self.limit = limit
 
         if temp_dir is None:
             self.temp_root = Path(tempfile.mkdtemp(prefix="roi_tiles_"))
@@ -149,7 +161,21 @@ class ShapefileTiler:
         single polygon and yields metadata as a dict.
         """
         # Loop over original polygons (use enumerate for proper indexing)
+        seen_polys: set[int] = set()
         for poly_idx, (idx, row) in enumerate(self.gdf_metric.iterrows()):
+            # Restrict to this worker's assigned range *before* writing any
+            # temp shapefile, so parallel workers sharing one temp_dir never
+            # write to the same path concurrently.
+            if poly_idx <= self.start_after_poly_idx:
+                continue
+            if (
+                self.limit is not None
+                and len(seen_polys) >= self.limit
+                and poly_idx not in seen_polys
+            ):
+                break
+            seen_polys.add(poly_idx)
+
             geom_metric = row.geometry
 
             # Skip empty / invalid geometries

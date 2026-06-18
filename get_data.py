@@ -229,6 +229,8 @@ def run_tiled_download(
         shp_path=str(shp_path),
         max_pixels=max_pixels,
         temp_dir=str(temp_dir),
+        start_after_poly_idx=start_after_poly_idx,
+        limit=limit,
     )
 
     total = ok = fail = skipped = 0
