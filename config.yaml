@@ -1,0 +1,32 @@
+# =============================================================================
+# Presto Pipeline Configuration
+# =============================================================================
+
+# Input shapefile
+shp: ./ROI/shahrestan/shahrestan.shp
+year: 2022
+
+# Sources to download — one or more of:
+# s2, s1, landsat, era5, esri_lulc, worldcover, embedding, srtm
+sources:
+  - s2
+  - s1
+
+# Output
+out: ./data/dataset
+temp: ./tmp_tiles
+
+# GEE credentials
+credentials_path: ./ee-rsai-service-account.json
+service_account: fanapanomaly@fanapanomaly.iam.gserviceaccount.com
+
+# Download settings
+max_pixels: 1024
+s2_bands: all        # all | [red, green, blue, nir, ...]
+s1_bands:            # subset of [VV, VH]
+  - VV
+  - VH
+worldcover_scale: 10
+
+# Parallelism: number of tiles downloaded simultaneously per source
+workers: 4

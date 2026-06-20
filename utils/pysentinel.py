@@ -333,6 +333,7 @@ class S1GEEDownloader:
         start_month: int = 9,
         start_day: int = 1,
         orbit_pass: str | None = None,  # e.g. "ASCENDING" / "DESCENDING" / None
+        bands: list[str] | str = "all",  # "all" or subset of ["VV", "VH"]
     ):
         # --------------------------------------------------------------
         # AUTH
@@ -352,7 +353,16 @@ class S1GEEDownloader:
         self.start_day = start_day
         self.orbit_pass = orbit_pass
 
-        print("✅ S1 downloader ready (VV, VH)")
+        _all = ["VV", "VH"]
+        if isinstance(bands, str) and bands.lower() == "all":
+            self.S1_NAMES = _all
+        else:
+            invalid = [b for b in bands if b not in _all]
+            if invalid:
+                raise ValueError(f"Invalid S1 bands: {invalid}. Valid: {_all}")
+            self.S1_NAMES = list(bands)
+
+        print(f"✅ S1 downloader ready ({', '.join(self.S1_NAMES)})")
 
     # ------------------------------------------------------------------
     #  GEOMETRY HELPERS (same logic as S2GEEDownloader)

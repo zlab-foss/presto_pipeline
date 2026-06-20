@@ -13,3 +13,4 @@ seaborn==0.13.2
 Shapely==2.1.2
 tqdm==4.66.2
 pycrs==1.0.2
+PyYAML>=6.0
