@@ -1,27 +1,38 @@
 workers: 4              # workers per (crop, source) group
-year: 2019
+# year is not needed: s1/s2 read their download window from each polygon's
+# own 'plant'/'harvest' columns in the refined crop-calendar shapefile.
 sources: [s1, s2]       # each crop runs once per source, all in parallel
 log_dir: ./logs_parallel
 
 crops:
   - name: barley
-    shp:  ./ROI/barley/shapefile-province-cc-shuffled.shp
+    shp:  ./ROI/barley/shapefile-province-cc-refined.shp
     out:  ./data/barley
     temp: ./tmp_tiles_barley
 
   - name: wheat
-    shp:  ./ROI/wheat/shapefile-province-cc-shuffled.shp
+    shp:  ./ROI/wheat/shapefile-province-cc-refined.shp
     out:  ./data/wheat
     temp: ./tmp_tiles_wheat
 
   - name: rice
-    shp:  ./ROI/rice/shapefile-province-cc-shuffled.shp
+    shp:  ./ROI/rice/shapefile-province-cc-refined.shp
     out:  ./data/rice
     temp: ./tmp_tiles_rice
 
+  - name: corn
+    shp:  ./ROI/corn/shapefile-province-cc-refined.shp
+    out:  ./data/corn
+    temp: ./tmp_tiles_corn
+
+  - name: kolza
+    shp:  ./ROI/kolza/shapefile-province-cc-refined.shp
+    out:  ./data/kolza
+    temp: ./tmp_tiles_kolza
+
   # Per-crop overrides:
   # - name: corn
-  #   shp:  ./ROI/corn/shapefile-province-cc-shuffled.shp
+  #   shp:  ./ROI/corn/shapefile-province-cc-refined.shp
   #   out:  ./data/corn
   #   temp: ./tmp_tiles_corn
   #   sources: [s2]      # only s2 for this crop
