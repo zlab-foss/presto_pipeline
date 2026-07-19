@@ -1,10 +1,15 @@
 """
 Parallel wrapper for get_data.py.
 
+--year is only needed for the non-crop-calendar sources (esri_lulc,
+worldcover, embedding). For s2/s1/landsat/era5, each polygon's download
+window comes from its own 'plant'/'harvest' shapefile columns, so --year
+can be omitted.
+
 Single crop (same as before):
   python run_parallel.py --workers 4 \\
       --shp ./ROI/barley/shapefile-province-cc-shuffled.shp \\
-      --year 2019 --source s2 \\
+      --source s2 \\
       --out ./data/barley --temp ./tmp_tiles_barley
 
 Multiple crops via config file:
@@ -12,7 +17,6 @@ Multiple crops via config file:
 
 crops.yaml format:
   workers: 4          # workers per crop
-  year: 2019
   source: s2
   crops:
     - shp:  ./ROI/barley/shapefile-province-cc-shuffled.shp

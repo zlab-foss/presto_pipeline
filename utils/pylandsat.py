@@ -31,10 +31,15 @@ except Exception:  # pragma: no cover
     def _force_2d(geom):
         return geom
 
+from utils.crop_calendar import read_plant_harvest, to_ee_dates, bin_window, apply_bin_gapfill
+
 
 class LandsatGEEDownloader:
     """
-    Download Landsat (8/9, 7, 5) monthly medians for a single ROI as a stacked GeoTIFF.
+    Download Landsat (8/9, 7, 5) biweekly medians for a single ROI as a
+    stacked GeoTIFF. The download window is the ROI's own 'plant' ->
+    'harvest' shapefile columns, split into 12 equal segments, each
+    composited from a centered 14-day window.
 
     - Uses Collection 2, Level-2 Surface Reflectance:
         * LANDSAT/LC08/C02/T1_L2 (Landsat 8)
@@ -55,8 +60,6 @@ class LandsatGEEDownloader:
         service_account: str,
         output_dir: str,
         export_scale: int = 30,
-        start_month: int = 9,
-        start_day: int = 1,
         # -----------------------------
         # Gap filling controls
         # -----------------------------
@@ -80,8 +83,6 @@ class LandsatGEEDownloader:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.export_scale = export_scale
-        self.start_month = start_month
-        self.start_day = start_day
 
         self.gapfill_enabled = gapfill_enabled
         self.gapfill_apply_to_l5 = gapfill_apply_to_l5
@@ -175,27 +176,6 @@ class LandsatGEEDownloader:
             lambda b: ee.String("M").cat(mtag).cat("_").cat(ee.String(b))
         )
 
-    def _season_month_to_calendar(self, season_year, m_idx):
-        season_year = ee.Number(season_year)
-        m_idx = ee.Number(m_idx)
-        start_m = ee.Number(self.start_month)
-
-        cal_month = start_m.subtract(1).add(m_idx.subtract(1)).mod(12).add(1)
-        year_offset = ee.Number(ee.Algorithms.If(cal_month.gte(start_m), 0, 1))
-        cal_year = season_year.add(year_offset)
-        return ee.Dictionary({"year": cal_year, "month": cal_month})
-
-    def _bin_start(self, season_year, m_idx):
-        d = self._season_month_to_calendar(season_year, m_idx)
-        return ee.Date.fromYMD(
-            ee.Number(d.get("year")),
-            ee.Number(d.get("month")),
-            self.start_day,
-        )
-
-    def _bin_end(self, season_year, m_idx):
-        return self._bin_start(season_year, m_idx).advance(1, "month")
-
     # ==============================================================
     # LANDSAT SENSOR / BAND SELECTION
     # ==============================================================
@@ -270,11 +250,8 @@ class LandsatGEEDownloader:
 
         return filled
 
-    def _ls_month(self, roi, season_year, m_idx) -> ee.Image:
-        start = self._bin_start(season_year, m_idx)
-        end = self._bin_end(season_year, m_idx)
-
-        base_col, band_codes, sensor = self._get_landsat_collection_and_bands(season_year)
+    def _ls_bin(self, roi, plant, harvest, bin_idx0, base_col, band_codes, sensor) -> ee.Dictionary:
+        start, end = bin_window(plant, harvest, bin_idx0)
 
         def _prep(img):
             return self._mask_and_scale(img, band_codes)
@@ -327,23 +304,30 @@ class LandsatGEEDownloader:
 
             return self._gap_fill_image(primary, fill_img).toFloat().clip(roi)
 
-        return ee.Image(
+        final_img = ee.Image(
             ee.Algorithms.If(
                 ee.Algorithms.IsEqual(self._should_gapfill(sensor), True),
                 _do_fill(),
                 primary.toFloat().clip(roi),
             )
         )
+        # "empty" reflects the narrow 14-day bin window, checked before any
+        # SLC-off widening, so a bin still empty after Landsat's own gap-fill
+        # gets caught by the cross-bin neighbor-mean fill applied in create_stack.
+        empty = ee.Number(ee.Algorithms.If(month_col.size().gt(0), 0, 1))
+        return ee.Dictionary({"img": final_img, "empty": empty})
 
     # ==============================================================
-    # BUILD SEASON STACK (12 × 6 bands)
+    # BUILD STACK (12 biweekly bins × 6 bands)
     # ==============================================================
-    def create_stack(self, roi, season_year: int) -> ee.Image:
-        def per_month(m):
-            ls = self._ls_month(roi, season_year, m)
-            return ls.rename(self._rename_with_month(self.LS_NAMES, m))
+    def create_stack(self, roi, plant: ee.Date, harvest: ee.Date, plant_year: int) -> ee.Image:
+        base_col, band_codes, sensor = self._get_landsat_collection_and_bands(plant_year)
 
-        images = ee.List.sequence(1, 12).map(per_month)
+        raw = [
+            self._ls_bin(roi, plant, harvest, i, base_col, band_codes, sensor)
+            for i in range(12)
+        ]
+        images = apply_bin_gapfill(raw, lambda m: self._rename_with_month(self.LS_NAMES, m))
         stack = ee.ImageCollection.fromImages(images).toBands()
 
         old = stack.bandNames()
@@ -357,22 +341,24 @@ class LandsatGEEDownloader:
         self,
         shp_path: str,
         out_tif: str,
-        season_year: int,
     ):
         feature = self._load_single_polygon(shp_path)
         roi = feature.geometry()
+
+        plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        plant, harvest = to_ee_dates(plant_dt, harvest_dt)
 
         out_tif = Path(out_tif)
         if not out_tif.is_absolute():
             out_tif = self.output_dir / out_tif
 
         print("============================================================")
-        print(f"[Landsat] Processing growing season {season_year}")
+        print(f"[Landsat] Processing crop-calendar window: {plant_dt.date()} -> {harvest_dt.date()}")
         print(f"ROI shapefile: {shp_path}")
         print(f"Output: {out_tif}")
         print("============================================================")
 
-        img = self.create_stack(roi, season_year)
+        img = self.create_stack(roi, plant, harvest, plant_dt.year)
         gd_img = geedim.MaskedImage(img.clip(roi))
 
         try:

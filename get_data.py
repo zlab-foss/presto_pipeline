@@ -30,6 +30,7 @@ from utils.pysatellite import (
 )
 
 from utils.shape_tiler import ShapefileTiler
+from utils.crop_calendar import read_plant_harvest
 
 
 # =========================
@@ -39,6 +40,10 @@ DEFAULT_CONFIGS = {
     "credentials_path": "./ee-rsai-service-account.json",
     "service_account": "fanapanomaly@fanapanomaly.iam.gserviceaccount.com",
 }
+
+# Sources whose download window comes from each polygon's own 'plant'/
+# 'harvest' shapefile columns rather than a CLI-wide --year.
+CROP_CAL_SOURCES = {"s2", "s1", "landsat", "era5"}
 
 
 # =========================
@@ -153,15 +158,14 @@ def _download_one_tile(
     source: str,
     tile_shp_path: str,
     out_tif: str,
-    year: int,
+    year: Optional[int],
 ) -> None:
     source = source.lower().strip()
 
-    if source in {"s2", "s1", "landsat", "era5"}:
+    if source in CROP_CAL_SOURCES:
         dl.download_from_shapefile(
             shp_path=tile_shp_path,
             out_tif=out_tif,
-            season_year=year,
         )
         return
 
@@ -201,7 +205,7 @@ def _download_one_tile(
 
 def run_tiled_download(
     shp_path: Path,
-    year: int,
+    year: Optional[int],
     source: str,
     out_root: Path,
     temp_dir: Path,
@@ -278,23 +282,29 @@ def run_tiled_download(
         print(f"  Tile idx     : {item.get('tile_idx')} -> {tile_tag}")
         print(f"  CRS          : {item.get('crs')}")
 
-        out_name = _mk_out_name(source=source, year=year, poly_idx=poly_idx, tile_tag=tile_tag)
-        out_path = out_dir / out_name
-
-        if _is_valid_tif(out_path):
-            ok += 1
-            skipped += 1
-            print(f"  Already downloaded and valid, skipping: {out_name}")
-            continue
-
         t0 = time.time()
         try:
+            if source in CROP_CAL_SOURCES:
+                plant_dt, _harvest_dt = read_plant_harvest(tile_shp)
+                tile_year = plant_dt.year
+            else:
+                tile_year = year
+
+            out_name = _mk_out_name(source=source, year=tile_year, poly_idx=poly_idx, tile_tag=tile_tag)
+            out_path = out_dir / out_name
+
+            if _is_valid_tif(out_path):
+                ok += 1
+                skipped += 1
+                print(f"  Already downloaded and valid, skipping: {out_name}")
+                continue
+
             _download_one_tile(
                 dl=dl,
                 source=source,
                 tile_shp_path=tile_shp,
                 out_tif=out_name,
-                year=year,
+                year=tile_year,
             )
             dt = time.time() - t0
             ok += 1
@@ -325,7 +335,17 @@ def run_tiled_download(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--shp", required=True, type=str, help="Path to input shapefile (.shp)")
-    p.add_argument("--year", required=True, type=int, help="Season year (or year for masks/embedding)")
+    p.add_argument(
+        "--year",
+        required=False,
+        default=None,
+        type=int,
+        help=(
+            "Year for masks/embedding sources (esri_lulc, worldcover, embedding). "
+            "Not used for s2/s1/landsat/era5 - those read their download window "
+            "from each polygon's own 'plant'/'harvest' shapefile columns."
+        ),
+    )
     p.add_argument(
         "--source",
         required=True,
@@ -359,8 +379,9 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    
 
+    if args.source in {"esri_lulc", "worldcover", "embedding"} and args.year is None:
+        raise SystemExit(f"--year is required for source '{args.source}'")
 
     run_tiled_download(
         shp_path=Path(args.shp),

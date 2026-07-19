@@ -32,10 +32,16 @@ except Exception:  # pragma: no cover
     def _force_2d(geom):
         return geom
 
+from utils.crop_calendar import read_plant_harvest, to_ee_dates, bin_window, apply_bin_gapfill
+
 
 class S2GEEDownloader:
     """
-    Download Sentinel-2 monthly medians for a single ROI as a stacked GeoTIFF.
+    Download Sentinel-2 biweekly medians for a single ROI as a stacked GeoTIFF.
+
+    The download window is the ROI's own 'plant' -> 'harvest' shapefile
+    columns, split into 12 equal segments, each composited from a centered
+    14-day window (empty bins are gap-filled from neighboring bins).
 
     Usage:
         downloader = S2GEEDownloader(
@@ -45,14 +51,11 @@ class S2GEEDownloader:
             bands=["B2", "B3", "B4", "B8"],  # or "all"
             s2_cloudy_pct=10,
             export_scale=10,
-            start_month=9,
-            start_day=1,
         )
 
         downloader.download_from_shapefile(
             shp_path="./data/ROI/benchmark.shp",  # MUST contain exactly 1 polygon
-            out_tif="season2024_benchmark.tif",
-            season_year=2024,
+            out_tif="benchmark.tif",
         )
     """
 
@@ -69,8 +72,6 @@ class S2GEEDownloader:
         bands: Union[str, List[str]] = ("B2", "B3", "B4", "B8"),
         s2_cloudy_pct: int = 10,
         export_scale: int = 10,
-        start_month: int = 9,
-        start_day: int = 1,
     ):
         # ------------------------------------------------------------------
         #  AUTH
@@ -87,8 +88,6 @@ class S2GEEDownloader:
 
         self.export_scale = export_scale
         self.s2_cloudy_pct = s2_cloudy_pct
-        self.start_month = start_month
-        self.start_day = start_day
 
         # ------------------------------------------------------------------
         #  BAND SELECTION
@@ -200,37 +199,11 @@ class S2GEEDownloader:
             lambda b: ee.String("M").cat(mtag).cat("_").cat(ee.String(b))
         )
 
-    def _season_month_to_calendar(self, season_year, m_idx):
-        """
-        Convert 1–12 season month index to (year, month) in calendar,
-        given season start_month (e.g. 9 → Sep).
-        """
-        season_year = ee.Number(season_year)
-        m_idx = ee.Number(m_idx)
-        start_m = ee.Number(self.start_month)
-
-        cal_month = start_m.subtract(1).add(m_idx.subtract(1)).mod(12).add(1)
-        year_offset = ee.Number(ee.Algorithms.If(cal_month.gte(start_m), 0, 1))
-        cal_year = season_year.add(year_offset)
-        return ee.Dictionary({"year": cal_year, "month": cal_month})
-
-    def _bin_start(self, season_year, m_idx):
-        d = self._season_month_to_calendar(season_year, m_idx)
-        return ee.Date.fromYMD(
-            ee.Number(d.get("year")),
-            ee.Number(d.get("month")),
-            self.start_day,
-        )
-
-    def _bin_end(self, season_year, m_idx):
-        return self._bin_start(season_year, m_idx).advance(1, "month")
-
     # ----------------------------------------------------------------------
-    #  S2 MONTHLY MEDIAN
+    #  S2 BIWEEKLY MEDIAN
     # ----------------------------------------------------------------------
-    def _s2_month(self, roi, season_year, m_idx):
-        start = self._bin_start(season_year, m_idx)
-        end = self._bin_end(season_year, m_idx)
+    def _s2_bin(self, roi, plant, harvest, bin_idx0):
+        start, end = bin_window(plant, harvest, bin_idx0)
 
         def _mask(img):
             qa = img.select("QA60")
@@ -257,26 +230,26 @@ class S2GEEDownloader:
             .clip(roi)
         )
 
-        return ee.Image(
+        img = ee.Image(
             ee.Algorithms.If(
                 col.size().gt(0),
                 col.median().toFloat().clip(roi),
                 fallback,
             )
         )
+        empty = ee.Number(ee.Algorithms.If(col.size().gt(0), 0, 1))
+        return ee.Dictionary({"img": img, "empty": empty})
 
     # ----------------------------------------------------------------------
-    #  BUILD S2-ONLY STACK (12 months × selected bands)
+    #  BUILD S2-ONLY STACK (12 biweekly bins × selected bands)
     # ----------------------------------------------------------------------
-    def create_stack(self, roi, season_year: int):
+    def create_stack(self, roi, plant: ee.Date, harvest: ee.Date):
         """
-        Create 12-month S2 median stack for given ROI and season year.
+        Create 12-bin S2 median stack (14-day windows spanning plant->harvest)
+        for the given ROI, gap-filling empty bins from neighboring bins.
         """
-        def per_month(m):
-            s2 = self._s2_month(roi, season_year, m)
-            return s2.rename(self._rename_with_month(self.S2_BANDS, m))
-
-        images = ee.List.sequence(1, 12).map(per_month)
+        raw = [self._s2_bin(roi, plant, harvest, i) for i in range(12)]
+        images = apply_bin_gapfill(raw, lambda m: self._rename_with_month(self.S2_BANDS, m))
         stack = ee.ImageCollection.fromImages(images).toBands()
 
         # Remove "M01_" prefix duplication (so bands like "M01_red" stay as is)
@@ -291,17 +264,20 @@ class S2GEEDownloader:
         self,
         shp_path: str,
         out_tif: str,
-        season_year: int,
     ):
         """
-        Load a single-polygon shapefile and download the seasonal S2 stack.
+        Load a single-polygon shapefile and download the S2 stack for its
+        own plant->harvest crop-calendar window.
 
-        shp_path  : path to a shapefile with exactly 1 polygon.
+        shp_path  : path to a shapefile with exactly 1 polygon, carrying
+                    'plant'/'harvest' (YYYY-MM-DD) attribute columns.
         out_tif   : output filename (full path or relative to output_dir).
-        season_year : integer season year (e.g. 2024).
         """
         feature = self._load_single_polygon(shp_path)
         roi = feature.geometry()
+
+        plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        plant, harvest = to_ee_dates(plant_dt, harvest_dt)
 
         # Ensure output path
         out_tif = Path(out_tif)
@@ -309,12 +285,12 @@ class S2GEEDownloader:
             out_tif = self.output_dir / out_tif
 
         print("============================================================")
-        print(f"Processing growing season {season_year}")
+        print(f"Processing crop-calendar window: {plant_dt.date()} -> {harvest_dt.date()}")
         print(f"ROI shapefile: {shp_path}")
         print(f"Output: {out_tif}")
         print("============================================================")
 
-        img = self.create_stack(roi, season_year)
+        img = self.create_stack(roi, plant, harvest)
         gd_img = geedim.MaskedImage(img.clip(roi))
 
         try:
@@ -339,8 +315,9 @@ class S1GEEDownloader:
 
     - Uses COPERNICUS/S1_GRD
     - Filters IW mode, 10 m, dual-pol VV/VH
-    - Converts dB → linear before taking monthly median
-    - Outputs 24 bands: M01_VV, M01_VH, ..., M12_VV, M12_VH
+    - Median composite in dB scale
+    - Outputs 24 bands: M01_VV, M01_VH, ..., M12_VV, M12_VH, one bin per
+      centered 14-day window across the ROI's own plant->harvest range.
 
     Usage:
         s1_down = S1GEEDownloader(
@@ -348,14 +325,11 @@ class S1GEEDownloader:
             service_account="xxx@yyy.iam.gserviceaccount.com",
             output_dir="./data/gee_inputs_s1",
             export_scale=10,
-            start_month=9,
-            start_day=1,
         )
 
         s1_down.download_from_shapefile(
             shp_path="./data/ROI/benchmark.shp",
-            out_tif="season2024_benchmark_s1.tif",
-            season_year=2024,
+            out_tif="benchmark_s1.tif",
         )
     """
 
@@ -368,8 +342,6 @@ class S1GEEDownloader:
         service_account: str,
         output_dir: str,
         export_scale: int = 10,
-        start_month: int = 9,
-        start_day: int = 1,
         orbit_pass: str | None = None,  # e.g. "ASCENDING" / "DESCENDING" / None
     ):
         # --------------------------------------------------------------
@@ -386,8 +358,6 @@ class S1GEEDownloader:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.export_scale = export_scale
-        self.start_month = start_month
-        self.start_day = start_day
         self.orbit_pass = orbit_pass
 
         print("✅ S1 downloader ready (VV, VH)")
@@ -478,40 +448,14 @@ class S1GEEDownloader:
             lambda b: ee.String("M").cat(mtag).cat("_").cat(ee.String(b))
         )
 
-    def _season_month_to_calendar(self, season_year, m_idx):
-        """
-        Convert 1–12 season month index to (year, month) in calendar,
-        given season start_month (e.g. 9 → Sep).
-        """
-        season_year = ee.Number(season_year)
-        m_idx = ee.Number(m_idx)
-        start_m = ee.Number(self.start_month)
-
-        cal_month = start_m.subtract(1).add(m_idx.subtract(1)).mod(12).add(1)
-        year_offset = ee.Number(ee.Algorithms.If(cal_month.gte(start_m), 0, 1))
-        cal_year = season_year.add(year_offset)
-        return ee.Dictionary({"year": cal_year, "month": cal_month})
-
-    def _bin_start(self, season_year, m_idx):
-        d = self._season_month_to_calendar(season_year, m_idx)
-        return ee.Date.fromYMD(
-            ee.Number(d.get("year")),
-            ee.Number(d.get("month")),
-            self.start_day,
-        )
-
-    def _bin_end(self, season_year, m_idx):
-        return self._bin_start(season_year, m_idx).advance(1, "month")
-
     # ------------------------------------------------------------------
     #  S1 HELPERS
     # ------------------------------------------------------------------
-    def _s1_month(self, roi, season_year, m_idx) -> ee.Image:
+    def _s1_bin(self, roi, plant, harvest, bin_idx0) -> ee.Dictionary:
         """
-        Build monthly composite for Sentinel-1 VV/VH in dB scale.
+        Build a biweekly composite for Sentinel-1 VV/VH in dB scale.
         """
-        start = self._bin_start(season_year, m_idx)
-        end = self._bin_end(season_year, m_idx)
+        start, end = bin_window(plant, harvest, bin_idx0)
 
         col_db = (
             ee.ImageCollection("COPERNICUS/S1_GRD")
@@ -537,7 +481,7 @@ class S1GEEDownloader:
             .clip(roi)
         )
 
-        return ee.Image(
+        img = ee.Image(
             ee.Algorithms.If(
                 col_db.size().gt(0),
                 col_db.median()
@@ -547,20 +491,20 @@ class S1GEEDownloader:
                 fallback,
             )
         )
+        empty = ee.Number(ee.Algorithms.If(col_db.size().gt(0), 0, 1))
+        return ee.Dictionary({"img": img, "empty": empty})
 
     # ------------------------------------------------------------------
-    #  BUILD S1 STACK (12 months × 2 bands)
+    #  BUILD S1 STACK (12 biweekly bins × 2 bands)
     # ------------------------------------------------------------------
-    def create_stack(self, roi, season_year: int) -> ee.Image:
+    def create_stack(self, roi, plant: ee.Date, harvest: ee.Date) -> ee.Image:
         """
-        Create 12-month S1 VV/VH median stack (dB scale) for given ROI and season year.
+        Create 12-bin S1 VV/VH median stack (dB scale, 14-day windows
+        spanning plant->harvest) for the given ROI, gap-filling empty bins
+        from neighboring bins.
         """
-
-        def per_month(m):
-            s1 = self._s1_month(roi, season_year, m)
-            return s1.rename(self._rename_with_month(self.S1_NAMES, m))
-
-        images = ee.List.sequence(1, 12).map(per_month)
+        raw = [self._s1_bin(roi, plant, harvest, i) for i in range(12)]
+        images = apply_bin_gapfill(raw, lambda m: self._rename_with_month(self.S1_NAMES, m))
         stack = ee.ImageCollection.fromImages(images).toBands()
 
         # Remove duplicated prefix artifacts (same trick as in S2 class)
@@ -575,31 +519,34 @@ class S1GEEDownloader:
         self,
         shp_path: str,
         out_tif: str,
-        season_year: int,
     ):
         """
-        Load a single-polygon shapefile and download the seasonal S1 stack.
+        Load a single-polygon shapefile and download the S1 stack for its
+        own plant->harvest crop-calendar window.
 
-        shp_path    : path to a shapefile with exactly 1 polygon.
+        shp_path    : path to a shapefile with exactly 1 polygon, carrying
+                      'plant'/'harvest' (YYYY-MM-DD) attribute columns.
         out_tif     : output filename (full path or relative to output_dir).
-        season_year : integer season year (e.g. 2024).
         """
         feature = self._load_single_polygon(shp_path)
         roi = feature.geometry()
+
+        plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        plant, harvest = to_ee_dates(plant_dt, harvest_dt)
 
         out_tif = Path(out_tif)
         if not out_tif.is_absolute():
             out_tif = self.output_dir / out_tif
 
         print("============================================================")
-        print(f"[S1] Processing growing season {season_year}")
+        print(f"[S1] Processing crop-calendar window: {plant_dt.date()} -> {harvest_dt.date()}")
         print(f"ROI shapefile: {shp_path}")
         print(f"Output: {out_tif}")
         if self.orbit_pass:
             print(f"Orbit pass filter: {self.orbit_pass}")
         print("============================================================")
 
-        img = self.create_stack(roi, season_year)
+        img = self.create_stack(roi, plant, harvest)
         gd_img = geedim.MaskedImage(img.clip(roi))
 
         try:

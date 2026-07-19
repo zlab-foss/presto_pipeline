@@ -7,3 +7,4 @@ TEMP/
 __pycache__/
 *.pyc
 tmp_tiles/
+*.zip

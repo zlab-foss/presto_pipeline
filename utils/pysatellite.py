@@ -30,17 +30,23 @@ except Exception:  # pragma: no cover
     def _force_2d(geom):
         return geom
 
+from utils.crop_calendar import read_plant_harvest, to_ee_dates, bin_window, apply_bin_gapfill
 
-## 1️⃣ ERA5 monthly (t2m, tp)
+
+## 1️⃣ ERA5 biweekly (t2m, tp)
 
 
 class ERA5GEEDownloader:
     """
-    ERA5-Land HOURLY -> monthly aggregates (t2m & total precip)
+    ERA5-Land HOURLY -> biweekly aggregates (t2m & total precip)
 
     Dataset: ECMWF/ERA5_LAND/HOURLY
-      - temperature_2m [K]              -> t2m [°C]  (monthly mean)
-      - total_precipitation_hourly [m]  -> tp  [m]   (monthly sum)
+      - temperature_2m [K]              -> t2m [°C]  (14-day mean)
+      - total_precipitation_hourly [m]  -> tp  [m]   (14-day sum)
+
+    The download window is the ROI's own 'plant' -> 'harvest' shapefile
+    columns, split into 12 equal segments, each aggregated from a centered
+    14-day window (empty bins are gap-filled from neighboring bins).
 
     Output bands (12 × 2):
       M01_t2m, M01_tp, ..., M12_t2m, M12_tp
@@ -55,8 +61,6 @@ class ERA5GEEDownloader:
         service_account: str,
         output_dir: str,
         export_scale: float = 30.0,   # use same as Landsat/S2 if you want same grid
-        start_month: int = 9,
-        start_day: int = 1,
     ):
         # AUTH (same pattern as your other downloaders)
         ee.Reset()
@@ -67,8 +71,6 @@ class ERA5GEEDownloader:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.export_scale = export_scale
-        self.start_month = start_month
-        self.start_day = start_day
 
         print("✅ ERA5-Land HOURLY downloader ready (t2m °C, tp m)")
 
@@ -156,43 +158,17 @@ class ERA5GEEDownloader:
             lambda b: ee.String("M").cat(mtag).cat("_").cat(ee.String(b))
         )
 
-    def _season_month_to_calendar(self, season_year, m_idx):
-        """
-        season_month 1..12 → calendar (year, month),
-        using season start_month (e.g. 9 for Sep).
-        """
-        season_year = ee.Number(season_year)
-        m_idx = ee.Number(m_idx)
-        start_m = ee.Number(self.start_month)
-
-        cal_month = start_m.subtract(1).add(m_idx.subtract(1)).mod(12).add(1)
-        year_offset = ee.Number(ee.Algorithms.If(cal_month.gte(start_m), 0, 1))
-        cal_year = season_year.add(year_offset)
-
-        return ee.Dictionary({"year": cal_year, "month": cal_month})
-
-    def _bin_start(self, season_year, m_idx):
-        d = self._season_month_to_calendar(season_year, m_idx)
-        return ee.Date.fromYMD(
-            ee.Number(d.get("year")),
-            ee.Number(d.get("month")),
-            self.start_day,
-        )
-
-    def _bin_end(self, season_year, m_idx):
-        return self._bin_start(season_year, m_idx).advance(1, "month")
-
     # ------------------------------------------------------------------
-    #  ERA5-Land monthly aggregates for one season-month
+    #  ERA5-Land biweekly aggregates for one bin
     # ------------------------------------------------------------------
-    def _era5_month(self, roi, season_year, m_idx) -> ee.Image:
+    def _era5_bin(self, roi, plant, harvest, bin_idx0) -> ee.Dictionary:
         """
-        For a given season_month index m_idx:
+        For a given bin index (14-day window centered in its 1/12 segment
+        of plant->harvest):
           - t2m = mean(temperature_2m) - 273.15  [°C]
           - tp  = sum(total_precipitation_hourly) [m]
         """
-        start = self._bin_start(season_year, m_idx)
-        end = self._bin_end(season_year, m_idx)
+        start, end = bin_window(plant, harvest, bin_idx0)
 
         col = (
             ee.ImageCollection(self.ERA5_COLLECTION)
@@ -211,33 +187,32 @@ class ERA5GEEDownloader:
         def _build(imgcol):
             imgcol = ee.ImageCollection(imgcol)
 
-            # monthly mean temperature (K → °C)
+            # biweekly mean temperature (K → °C)
             t2mK = imgcol.select("temperature_2m").mean()
             t2mC = t2mK.subtract(273.15)
 
-            # monthly sum of hourly total precip
-            tp_month = imgcol.select("total_precipitation_hourly").sum()
+            # biweekly sum of hourly total precip
+            tp_bin = imgcol.select("total_precipitation_hourly").sum()
 
-            era = t2mC.addBands(tp_month)
+            era = t2mC.addBands(tp_bin)
             return era.rename(self.ERA5_NAMES).toFloat().clip(roi)
 
-        return ee.Image(
+        img = ee.Image(
             ee.Algorithms.If(
                 col.size().gt(0),
                 _build(col),
                 fallback,
             )
         )
+        empty = ee.Number(ee.Algorithms.If(col.size().gt(0), 0, 1))
+        return ee.Dictionary({"img": img, "empty": empty})
 
     # ------------------------------------------------------------------
-    #  BUILD 12-MONTH ERA5 STACK (same pattern as your L8 stack)
+    #  BUILD 12-BIN ERA5 STACK (same pattern as the L8 stack)
     # ------------------------------------------------------------------
-    def create_stack(self, roi, season_year: int) -> ee.Image:
-        def per_month(m):
-            era = self._era5_month(roi, season_year, m)
-            return era.rename(self._rename_with_month(self.ERA5_NAMES, m))
-
-        images = ee.List.sequence(1, 12).map(per_month)
+    def create_stack(self, roi, plant: ee.Date, harvest: ee.Date) -> ee.Image:
+        raw = [self._era5_bin(roi, plant, harvest, i) for i in range(12)]
+        images = apply_bin_gapfill(raw, lambda m: self._rename_with_month(self.ERA5_NAMES, m))
         stack = ee.ImageCollection.fromImages(images).toBands()
         return stack.toFloat()
 
@@ -248,10 +223,12 @@ class ERA5GEEDownloader:
         self,
         shp_path: str,
         out_tif: str,
-        season_year: int,
     ):
         feature = self._load_single_polygon(shp_path)
         roi = feature.geometry()
+
+        plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        plant, harvest = to_ee_dates(plant_dt, harvest_dt)
 
         out_tif = Path(out_tif)
         if not out_tif.is_absolute():
@@ -259,12 +236,12 @@ class ERA5GEEDownloader:
         out_tif.parent.mkdir(parents=True, exist_ok=True)
 
         print("============================================================")
-        print(f"[ERA5-Land HOURLY] Processing season {season_year}")
+        print(f"[ERA5-Land HOURLY] Processing crop-calendar window: {plant_dt.date()} -> {harvest_dt.date()}")
         print(f"ROI shapefile: {shp_path}")
         print(f"Output: {out_tif}")
         print("============================================================")
 
-        img = self.create_stack(roi, season_year).clip(roi)
+        img = self.create_stack(roi, plant, harvest).clip(roi)
 
         gd_img = geedim.MaskedImage(img)
 
