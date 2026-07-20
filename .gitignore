@@ -8,3 +8,5 @@ __pycache__/
 *.pyc
 tmp_tiles/
 *.zip
+logs_parallel/
+tmp_tiles_*
