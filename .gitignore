@@ -10,3 +10,6 @@ tmp_tiles/
 *.zip
 logs_parallel/
 tmp_tiles_*
+*.xml
+*.tif
+*.png
