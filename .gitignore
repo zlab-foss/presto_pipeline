@@ -13,3 +13,4 @@ tmp_tiles_*
 *.xml
 *.tif
 *.png
+raster_tiles/
