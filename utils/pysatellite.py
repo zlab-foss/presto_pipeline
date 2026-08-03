@@ -223,11 +223,16 @@ class ERA5GEEDownloader:
         self,
         shp_path: str,
         out_tif: str,
+        plant=None,
+        harvest=None,
     ):
         feature = self._load_single_polygon(shp_path)
         roi = feature.geometry()
 
-        plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        if plant is None or harvest is None:
+            plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        else:
+            plant_dt, harvest_dt = plant, harvest
         plant, harvest = to_ee_dates(plant_dt, harvest_dt)
 
         out_tif = Path(out_tif)

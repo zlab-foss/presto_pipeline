@@ -2,29 +2,21 @@
 Parallel wrapper for get_data.py.
 
 --year is only needed for the non-crop-calendar sources (esri_lulc,
-worldcover, embedding). For s2/s1/landsat/era5, each polygon's download
-window comes from its own 'plant'/'harvest' shapefile columns, so --year
-can be omitted.
+worldcover, embedding). For s2/s1/landsat/era5, each polygon is downloaded
+once per candidate crop (see get_data.py's --actual-crop/--candidates),
+using that candidate's own calendar columns from the shapefile-all-cc.shp
+produced by scripts/add_all_crop_calendars.py, so --year can be omitted.
 
-Single crop (same as before):
+Single crop (same as before), passing --actual-crop/--manifest-dir through
+to get_data.py yourself:
   python run_parallel.py --workers 4 \\
-      --shp ./ROI/barley/shapefile-province-cc-shuffled.shp \\
-      --source s2 \\
-      --out ./data/barley --temp ./tmp_tiles_barley
+      --shp ./ROI/barley/shapefile-all-cc.shp \\
+      --source s2 --actual-crop barley \\
+      --out ./data --manifest-dir ./data/manifest --temp ./tmp_tiles_barley
 
-Multiple crops via config file:
+Multiple crops via config file (recommended -- see crops.yaml, which injects
+--actual-crop/--manifest-dir per crop automatically):
   python run_parallel.py --config crops.yaml
-
-crops.yaml format:
-  workers: 4          # workers per crop
-  source: s2
-  crops:
-    - shp:  ./ROI/barley/shapefile-province-cc-shuffled.shp
-      out:  ./data/barley
-      temp: ./tmp_tiles_barley
-    - shp:  ./ROI/wheat/shapefile-province-cc-shuffled.shp
-      out:  ./data/wheat
-      temp: ./tmp_tiles_wheat
 """
 
 from __future__ import annotations
@@ -164,6 +156,12 @@ def _launch_crop(
 # Config-file mode
 # ---------------------------------------------------------------------------
 
+# Sources whose window comes from each polygon's own plant/harvest crop
+# calendar (mirrors get_data.py's CROP_CAL_SOURCES). Only these get
+# --actual-crop / --manifest-dir injected.
+CROP_CAL_SOURCES = {"s2", "s1", "landsat", "era5"}
+
+
 def _run_from_config(config_path: Path) -> None:
     try:
         import yaml
@@ -176,6 +174,11 @@ def _run_from_config(config_path: Path) -> None:
     workers: int = cfg.get("workers", 4)
     log_dir = Path(cfg.get("log_dir", "./logs_parallel"))
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Shared output root / manifest dir: tifs land in <out>/<source>/,
+    # manifests in <manifest_dir>/; crop no longer determines the directory.
+    global_out = cfg.get("out")
+    global_manifest_dir = cfg.get("manifest_dir")
 
     # Shared passthrough args (year, max_pixels, s2_bands)
     shared_passthrough: list[str] = []
@@ -198,21 +201,33 @@ def _run_from_config(config_path: Path) -> None:
     group_names: list[str] = []
 
     for crop_cfg in cfg["crops"]:
-        crop_name = crop_cfg.get("name") or Path(crop_cfg["shp"]).parts[-2]
+        crop_name = crop_cfg.get("name")
+        if not crop_name:
+            sys.exit(f"ERROR: crop entry missing required 'name' field: {crop_cfg}")
         crop_sources = crop_cfg.get("sources") or (
             [crop_cfg["source"]] if "source" in crop_cfg else global_sources
         )
         if not crop_sources:
             sys.exit(f"ERROR [{crop_name}]: no source(s) configured.")
 
+        out = crop_cfg.get("out", global_out)
+        manifest_dir = crop_cfg.get("manifest_dir", global_manifest_dir)
+        if not out:
+            sys.exit(f"ERROR [{crop_name}]: no 'out' configured (crop-level or top-level).")
+
         for source in crop_sources:
             group_name = f"{crop_name}-{source}"
             passthrough = shared_passthrough + [
                 "--source", source,
                 "--shp",  crop_cfg["shp"],
-                "--out",  crop_cfg["out"],
+                "--out",  out,
                 "--temp", crop_cfg["temp"],
             ]
+            if source in CROP_CAL_SOURCES:
+                if not manifest_dir:
+                    sys.exit(f"ERROR [{crop_name}]: no 'manifest_dir' configured for source '{source}'.")
+                passthrough += ["--actual-crop", crop_name, "--manifest-dir", manifest_dir]
+
             threads, results = _launch_crop(
                 crop_name=group_name,
                 base_args=passthrough,

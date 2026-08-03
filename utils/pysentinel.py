@@ -264,6 +264,8 @@ class S2GEEDownloader:
         self,
         shp_path: str,
         out_tif: str,
+        plant=None,
+        harvest=None,
     ):
         """
         Load a single-polygon shapefile and download the S2 stack for its
@@ -272,11 +274,16 @@ class S2GEEDownloader:
         shp_path  : path to a shapefile with exactly 1 polygon, carrying
                     'plant'/'harvest' (YYYY-MM-DD) attribute columns.
         out_tif   : output filename (full path or relative to output_dir).
+        plant/harvest : optional pre-read pandas Timestamps. If omitted,
+                    read from shp_path's 'plant'/'harvest' columns.
         """
         feature = self._load_single_polygon(shp_path)
         roi = feature.geometry()
 
-        plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        if plant is None or harvest is None:
+            plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        else:
+            plant_dt, harvest_dt = plant, harvest
         plant, harvest = to_ee_dates(plant_dt, harvest_dt)
 
         # Ensure output path
@@ -519,6 +526,8 @@ class S1GEEDownloader:
         self,
         shp_path: str,
         out_tif: str,
+        plant=None,
+        harvest=None,
     ):
         """
         Load a single-polygon shapefile and download the S1 stack for its
@@ -527,11 +536,16 @@ class S1GEEDownloader:
         shp_path    : path to a shapefile with exactly 1 polygon, carrying
                       'plant'/'harvest' (YYYY-MM-DD) attribute columns.
         out_tif     : output filename (full path or relative to output_dir).
+        plant/harvest : optional pre-read pandas Timestamps. If omitted,
+                    read from shp_path's 'plant'/'harvest' columns.
         """
         feature = self._load_single_polygon(shp_path)
         roi = feature.geometry()
 
-        plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        if plant is None or harvest is None:
+            plant_dt, harvest_dt = read_plant_harvest(shp_path)
+        else:
+            plant_dt, harvest_dt = plant, harvest
         plant, harvest = to_ee_dates(plant_dt, harvest_dt)
 
         out_tif = Path(out_tif)

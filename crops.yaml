@@ -1,39 +1,43 @@
 workers: 8              # workers per (crop, source) group
 # year is not needed: s1/s2 read their download window from each polygon's
-# own 'plant'/'harvest' columns in the refined crop-calendar shapefile.
+# own candidate-crop calendar columns (pl_<crop>/hv_<crop>) in the
+# shapefile-all-cc.shp produced by scripts/add_all_crop_calendars.py.
 sources: [s1, s2]       # each crop runs once per source, all in parallel
 log_dir: ./logs_parallel
 
+# Single shared output root: tifs land in ./data/<source>/, manifests in
+# ./data/manifest/. Crop no longer determines the output directory --
+# every candidate-crop tile for every parcel of every crop lands in the
+# same <source> directory, disambiguated by filename (see get_data.py's
+# _mk_out_name), and rows are tied to their parcel/candidate via the
+# manifest CSVs.
+out: ./data
+manifest_dir: ./data/manifest
+
 crops:
   - name: barley
-    shp:  ./ROI/crop/barley/shapefile-province-cc-refined.shp
-    out:  ./data/barley
+    shp:  ./ROI/barley/shapefile-all-cc.shp
     temp: ./tmp_tiles_barley
 
   - name: wheat
-    shp:  ./ROI/crop/wheat/shapefile-province-cc-refined.shp
-    out:  ./data/wheat
+    shp:  ./ROI/wheat/shapefile-all-cc.shp
     temp: ./tmp_tiles_wheat
 
   - name: rice
-    shp:  ./ROI/crop/rice/shapefile-province-cc-refined.shp
-    out:  ./data/rice
+    shp:  ./ROI/rice/shapefile-all-cc.shp
     temp: ./tmp_tiles_rice
 
   - name: corn
-    shp:  ./ROI/crop/corn/shapefile-province-cc-refined.shp
-    out:  ./data/corn
+    shp:  ./ROI/corn/shapefile-all-cc.shp
     temp: ./tmp_tiles_corn
 
   - name: kolza
-    shp:  ./ROI/crop/kolza/shapefile-province-cc-refined.shp
-    out:  ./data/kolza
+    shp:  ./ROI/kolza/shapefile-all-cc.shp
     temp: ./tmp_tiles_kolza
 
   # Per-crop overrides:
   # - name: corn
-  #   shp:  ./ROI/corn/shapefile-province-cc-refined.shp
-  #   out:  ./data/corn
+  #   shp:  ./ROI/corn/shapefile-all-cc.shp
   #   temp: ./tmp_tiles_corn
   #   sources: [s2]      # only s2 for this crop
   #   workers: 2
