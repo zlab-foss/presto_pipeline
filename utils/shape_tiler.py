@@ -127,17 +127,19 @@ class ShapefileTiler:
         Convert GeoDataFrame to an appropriate metric CRS.
         Tries to use UTM zone based on centroid, falls back to Web Mercator.
         """
-        # Get the centroid of all geometries
-        centroid = gdf.unary_union.centroid
-        
-        # If not in lat/lon, convert temporarily
+        # Use the midpoint of the overall bounding box as a representative
+        # point. This is O(1) on the existing index and avoids a full
+        # unary_union cascade over every polygon (which, for a nationwide
+        # shapefile with tens of thousands of features, can take a very
+        # long time just to pick a UTM zone).
         if gdf.crs.is_geographic:
-            lon, lat = centroid.x, centroid.y
+            minx, miny, maxx, maxy = gdf.total_bounds
+            lon, lat = (minx + maxx) / 2, (miny + maxy) / 2
         else:
             # Convert to lat/lon first
             gdf_latlon = gdf.to_crs(epsg=4326)
-            centroid_latlon = gdf_latlon.unary_union.centroid
-            lon, lat = centroid_latlon.x, centroid_latlon.y
+            minx, miny, maxx, maxy = gdf_latlon.total_bounds
+            lon, lat = (minx + maxx) / 2, (miny + maxy) / 2
         
         # Calculate UTM zone
         utm_zone = int((lon + 180) / 6) + 1
