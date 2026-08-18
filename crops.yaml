@@ -16,23 +16,23 @@ manifest_dir: ./data/manifest
 
 crops:
   - name: barley
-    shp:  ./ROI/barley/shapefile-all-cc.shp
+    shp:  ./ROI/crop/barley/shapefile-all-cc.shp
     temp: ./tmp_tiles_barley
 
   - name: wheat
-    shp:  ./ROI/wheat/shapefile-all-cc.shp
+    shp:  ./ROI/crop/wheat/shapefile-all-cc.shp
     temp: ./tmp_tiles_wheat
 
   - name: rice
-    shp:  ./ROI/rice/shapefile-all-cc.shp
+    shp:  ./ROI/crop/rice/shapefile-all-cc.shp
     temp: ./tmp_tiles_rice
 
   - name: corn
-    shp:  ./ROI/corn/shapefile-all-cc.shp
+    shp:  ./ROI/crop/corn/shapefile-all-cc.shp
     temp: ./tmp_tiles_corn
 
   - name: kolza
-    shp:  ./ROI/kolza/shapefile-all-cc.shp
+    shp:  ./ROI/crop/kolza/shapefile-all-cc.shp
     temp: ./tmp_tiles_kolza
 
   # Per-crop overrides:
